@@ -1,0 +1,1 @@
+- [TraderMind import](tradermind-import.md) — offline-first trading journal; Dexie IndexedDB only, no server DB; all attached_assets zips extracted to restore the project.

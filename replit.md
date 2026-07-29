@@ -1,44 +1,58 @@
-# [Project name]
+# TraderMind OS
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+یک ژورنال معاملاتی و پلتفرم آنالیتیکس آفلاین-اول جامع. تمام داده‌ها به صورت محلی در مرورگر از طریق IndexedDB ذخیره می‌شوند — بدون سرور، بدون cloud sync.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/tradermind run dev` — run the TraderMind web app
+- `pnpm --filter @workspace/api-server run dev` — run the API server (not used by main app)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Frontend: React 19, Vite 7, Tailwind CSS v4
+- DB: Dexie v4 (IndexedDB, schema v21) — fully offline, no server DB needed
+- State: Zustand v5 (always use `useShallow` selectors)
+- Data fetching: TanStack Query v5
+- Virtualization: @tanstack/react-virtual v3
+- Analytics: Custom metrics engine + Web Worker
+- Charts: Recharts
+- i18n: Persian (Farsi / RTL) — Vazirmatn font
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+| Path | Purpose |
+|------|---------|
+| `artifacts/tradermind/src/db/database.ts` | Dexie schema v21 |
+| `artifacts/tradermind/src/core/repositories/` | Typed Dexie queries |
+| `artifacts/tradermind/src/core/metrics/` | Pure metric functions |
+| `artifacts/tradermind/src/services/analyticsEngine.ts` | Analytics orchestrator |
+| `artifacts/tradermind/src/workers/analytics.worker.ts` | Web Worker |
+| `artifacts/tradermind/src/hooks/useTradeAnalytics.ts` | React Query hook |
+| `artifacts/tradermind/src/store/useAppStore.ts` | Zustand store |
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Offline-first: IndexedDB via Dexie — no server required
+- Web Worker for heavy analytics to keep UI thread responsive
+- Repository pattern for all DB reads (never raw `db.x.toArray()`)
+- In-memory analytics cache (`analyticsCacheService`) — invalidated on DB writes
+- AbortController guards in async hooks
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Persian (Farsi) UI — maintain RTL layout
+- Dark mode default
+- Offline-first — no API calls, no auth required
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Always use `useShallow` when selecting from Zustand store
+- Never use raw `db.x.toArray()` — always go through repositories
+- Electron-related scripts (`electron:dev`, `electron:build`) are not used in Replit
 
 ## Pointers
 
