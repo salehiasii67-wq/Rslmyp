@@ -3,7 +3,7 @@
  * تمام توابع pure هستند و قابل Unit Test.
  */
 import { Trade, DailyJournal, Strategy } from '../db/database';
-import { isWin, isLoss, isClosed, toDateStr } from '../lib/tradeHelpers';
+import { isWin, isLoss, isClosed, toDateStr, netPnl } from '../lib/tradeHelpers';
 
 // ================================================================
 // Types
@@ -144,7 +144,7 @@ function calcAvgR(trades: Trade[]): number | null {
 }
 
 function calcTotalPnl(trades: Trade[]): number {
-  return trades.reduce((s, t) => s + (t.profitLoss || 0), 0);
+  return trades.reduce((s, t) => s + netPnl(t), 0);
 }
 
 function parseEmotions(json: string): string[] {
@@ -206,7 +206,7 @@ export function computeAnalytics(
 ): AnalyticsData {
   const strategyMap = new Map<string, string>(strategies.map(s => [s.id, s.name]));
   const closed = trades.filter(isClosed);
-  const pnlValues = closed.map(t => t.profitLoss || 0);
+  const pnlValues = closed.map(netPnl);
 
   // ---- Summary ----
   const summary: TradeSummary = {
@@ -230,8 +230,9 @@ export function computeAnalytics(
   const chrono = [...closed].sort((a, b) => (a.closedAt || a.openedAt) - (b.closedAt || b.openedAt));
   let cum = 0;
   const pnlCurve: PnlPoint[] = chrono.map((t, i) => {
-    cum += t.profitLoss || 0;
-    return { index: i + 1, symbol: t.symbol, pnl: +(t.profitLoss || 0).toFixed(2), cumulative: +cum.toFixed(2) };
+    const pnl = netPnl(t);
+    cum += pnl;
+    return { index: i + 1, symbol: t.symbol, pnl: +pnl.toFixed(2), cumulative: +cum.toFixed(2) };
   });
 
   // ---- Strategy Performance ----
