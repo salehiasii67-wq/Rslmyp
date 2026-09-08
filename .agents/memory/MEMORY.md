@@ -1,1 +1,2 @@
 - [TraderMind import](tradermind-import.md) — offline-first trading journal; Dexie IndexedDB only, no server DB; all attached_assets zips extracted to restore the project.
+- [TraderMind analytics conventions](tradermind-analytics-conventions.md) — financial analytics use net P/L and ISO week grouping; regression tests cover fees and date boundaries.
