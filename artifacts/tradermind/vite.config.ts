@@ -84,6 +84,22 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true,
+    rollupOptions: {
+      onwarn(warning, warn) {
+        if (warning.code === 'SOURCEMAP_ERROR') return;
+        warn(warning);
+      },
+      output: {
+        manualChunks(id) {
+          if (
+            id.includes('/node_modules/react-dom/') ||
+            id.includes('/node_modules/react/')
+          ) {
+            return 'react-vendor';
+          }
+        },
+      },
+    },
   },
   server: {
     port,
