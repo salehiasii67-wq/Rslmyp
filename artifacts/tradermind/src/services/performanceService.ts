@@ -3,17 +3,19 @@
  * Prompt 25 — Pure calculation functions, no DB access, completely offline.
  */
 import { Trade, PostTradeReviewData } from '../db/database';
-import { avg, median, stdDev, toDateStr, isWin, isLoss, isClosed, getPTR, flagCount } from '../lib/tradeHelpers';
+import { avg, median, stdDev, toDateStr, isWin, isLoss, isClosed, getPTR, flagCount, netPnl } from '../lib/tradeHelpers';
 
 // ─────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────
 function weekKey(ts: number): string {
   const d = new Date(ts);
-  const day = d.getUTCDay();
-  const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
-  const mon = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), diff));
-  return `${mon.getUTCFullYear()}-W${String(Math.ceil((mon.getUTCDate() + (mon.getUTCDay() || 7) - 1) / 7)).padStart(2, '0')}`;
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - day + 4);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = Date.UTC(isoYear, 0, 1);
+  const week = Math.floor((d.getTime() - yearStart) / 86400000 / 7) + 1;
+  return `${isoYear}-W${String(week).padStart(2, '0')}`;
 }
 function monthKey(ts: number): string {
   const d = new Date(ts); return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -62,8 +64,9 @@ export function calcBaseMetrics(trades: Trade[]): BaseMetrics {
   const avgLoss = avg(lossRs);
   const expectancy = winRate !== null && avgWin !== null && avgLoss !== null
     ? winRate * avgWin + (1 - winRate) * avgLoss : null;
-  const totalWin = wins.reduce((s, t) => s + Math.max(0, t.profitLoss ?? 0), 0);
-  const totalLoss = Math.abs(losses.reduce((s, t) => s + Math.min(0, t.profitLoss ?? 0), 0));
+  const netPnls = closed.map(netPnl);
+  const totalWin = netPnls.reduce((s, pnl) => s + Math.max(0, pnl), 0);
+  const totalLoss = Math.abs(netPnls.reduce((s, pnl) => s + Math.min(0, pnl), 0));
   return {
     count: closed.length, winCount: wins.length, lossCount: losses.length, breakEvenCount: breakEvens.length,
     winRate, avgR: avg(Rs), medianR: median(Rs), expectancy,
@@ -71,7 +74,7 @@ export function calcBaseMetrics(trades: Trade[]): BaseMetrics {
     avgWin, avgLoss,
     maxWin: winRs.length ? Math.max(...winRs) : null,
     maxLoss: lossRs.length ? Math.min(...lossRs) : null,
-    totalPnL: closed.reduce((s, t) => s + (t.profitLoss ?? 0), 0),
+    totalPnL: netPnls.reduce((s, pnl) => s + pnl, 0),
     sampleWarning: closed.length < 20,
   };
 }
@@ -124,11 +127,11 @@ export function getPerformanceProfile(trades: Trade[]): PerformanceProfile {
 // 2. Performance By Day of Week
 // ─────────────────────────────────────────────────────────────────
 export interface DayPerf extends BaseMetrics {
-  dayNum: number;  // 0=Mon..4=Fri (local UTC day)
+  dayNum: number;  // 0=یکشنبه..6=شنبه (روز UTC)
   dayName: string;
 }
 
-const DAY_NAMES = ['شنبه', 'یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه'];
+const DAY_NAMES = ['یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه'];
 
 export function getByDay(trades: Trade[]): DayPerf[] {
   const byDay = new Map<number, Trade[]>();
@@ -671,7 +674,12 @@ export function getScorecard(trades: Trade[]): Scorecard {
   const behaviorScore = Math.max(0, Math.min(100, 100 - totalMistakePct * 80));
 
   // Learning: completed reviews + strengths detected
-  const reviewRate = closed.length > 0 ? trades.filter(t => { try { const r = getPTR(t); return r && r.completedAt > 0; } catch { return false; } }).length / closed.length : 0;
+  const reviewRate = closed.length > 0
+    ? closed.filter(t => {
+      const r = getPTR(t);
+      return r !== null && r.completedAt > 0;
+    }).length / closed.length
+    : 0;
   const learningScore = Math.min(100, reviewRate * 100 * 0.7 + Math.min(30, strengths.length * 10));
 
   const components: ScorecardComponent[] = [
@@ -706,10 +714,13 @@ export function getPerfInsights(trades: Trade[]): PerfInsight[] {
 
   // Best session
   const bySession = getBySession(trades);
-  if (bySession.length >= 2 && !bySession[0].sampleWarning) {
-    const best = bySession[0];
+  const eligibleSessions = bySession.filter(s => !s.sampleWarning && s.avgR !== null);
+  if (eligibleSessions.length >= 2) {
+    const best = [...eligibleSessions].sort((a, b) =>
+      (b.avgR! - a.avgR!) || (b.count - a.count)
+    )[0];
     insights.push({ id: 'best-session', title: `بهترین سشن: ${best.label}`,
-      description: `بیشترین معاملات شما (${best.count}) در سشن ${best.label} انجام شده با میانگین ${best.avgR?.toFixed(2) ?? '—'}R`,
+      description: `بهترین عملکرد شما در سشن ${best.label} با میانگین ${best.avgR?.toFixed(2) ?? '—'}R ثبت شده است`,
       evidence: `نرخ برد ${best.winRate !== null ? (best.winRate*100).toFixed(0)+'%' : '—'}`, examples: best.count,
       confidence: best.count >= 10 ? 'high' : 'medium', category: 'strength', dateRange: dr });
   }
@@ -717,17 +728,21 @@ export function getPerfInsights(trades: Trade[]): PerfInsight[] {
   // Best setup
   const bySetup = getBySetup(trades).filter(s => !s.sampleWarning && s.avgR !== null);
   if (bySetup.length >= 2) {
-    const best = bySetup[0];
-    insights.push({ id: 'best-setup', title: `بهترین سبک: ${best.label}`,
-      description: `سبک ${best.label} با ${best.count} معامله میانگین ${best.avgR?.toFixed(2)}R دارد`,
-      evidence: `نرخ برد: ${best.winRate !== null ? (best.winRate*100).toFixed(0)+'%' : '—'}`, examples: best.count,
-      confidence: best.count >= 10 ? 'high' : 'medium', category: 'strength', dateRange: dr });
-    if (bySetup.length > 1) {
-      const worst = bySetup[bySetup.length - 1];
+    const eligibleSetups = bySetup.filter(s => !s.sampleWarning);
+    if (eligibleSetups.length >= 2) {
+      const sortedSetups = [...eligibleSetups].sort((a, b) =>
+        ((b.avgR ?? -Infinity) - (a.avgR ?? -Infinity)) || (b.count - a.count)
+      );
+      const best = sortedSetups[0];
+      insights.push({ id: 'best-setup', title: `بهترین سبک: ${best.label}`,
+        description: `سبک ${best.label} با ${best.count} معامله میانگین ${best.avgR?.toFixed(2)}R دارد`,
+        evidence: `نرخ برد: ${best.winRate !== null ? (best.winRate*100).toFixed(0)+'%' : '—'}`, examples: best.count,
+        confidence: best.count >= 10 ? 'high' : 'medium', category: 'strength', dateRange: dr });
+      const worst = sortedSetups[sortedSetups.length - 1];
       if ((worst.avgR ?? 0) < 0) insights.push({ id: 'worst-setup', title: `ضعیف‌ترین سبک: ${worst.label}`,
-        description: `سبک ${worst.label} میانگین ${worst.avgR?.toFixed(2)}R دارد`,
-        evidence: `${worst.lossCount} از ${worst.count} معامله با ضرر`, examples: worst.count,
-        confidence: worst.count >= 8 ? 'high' : 'medium', category: 'warning', dateRange: dr });
+          description: `سبک ${worst.label} میانگین ${worst.avgR?.toFixed(2)}R دارد`,
+          evidence: `${worst.lossCount} از ${worst.count} معامله با ضرر`, examples: worst.count,
+          confidence: worst.count >= 8 ? 'high' : 'medium', category: 'warning', dateRange: dr });
     }
   }
 
@@ -862,7 +877,7 @@ export function getDecisionQualityAnalysis(trades: Trade[]): DecisionQualityAnal
   const buckets: DecisionQualityBucket[] = [];
   for (let i = 0; i < BUCKETS.length; i++) {
     const def = BUCKETS[i];
-    const maxVal = i === 0 ? 100 : BUCKETS[i - 1].min;
+    const maxVal = i === 0 ? Number.POSITIVE_INFINITY : BUCKETS[i - 1].min;
     const ts = scored.filter(x => x.score >= def.min && x.score < maxVal).map(x => x.t);
     if (ts.length === 0) continue;
     const rs = ts.filter(t => getR(t) !== null).map(t => getR(t)!);
