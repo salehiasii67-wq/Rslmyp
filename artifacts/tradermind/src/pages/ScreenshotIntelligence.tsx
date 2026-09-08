@@ -1,478 +1,4 @@
-/**
- * Screenshot Intelligence — Prompt 27
- * ───────────────────────────────────────────────────────────────
- * موتور هوشمند اسکرین‌شات چارت، مقایسه بصری معاملات،
- * و سیستم تشخیص الگوی شخصی
- * کاملاً آفلاین | ذخیره‌سازی محلی | بدون ارسال به سرور
- */
-
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
-import {
-  Upload, Image as ImageIcon, Layers, FolderOpen, BarChart3, X,
-  Plus, Search, Eye, Edit2, Trash2, Camera, ChevronDown, ChevronUp,
-  BookOpen, Zap, AlertTriangle, CheckCircle2, TrendingUp, TrendingDown,
-  Tag, Grid3x3, List, Filter, Save, FolderPlus, Brain, ArrowRight,
-  Shield, History, Target, Sparkles, Info, Package, RotateCcw,
-  SlidersHorizontal, Calendar, Clock, Globe2, Users
-} from 'lucide-react';
-import { db, ChartScreenshot, ScreenshotCollection, VisualPattern, ScreenshotGroup, Trade } from '../db/database';
-import {
-  getAllChartScreenshots, saveChartScreenshot, updateChartScreenshot, deleteChartScreenshot,
-  getAllCollections, saveCollection, updateCollection, deleteCollection, addToCollection, removeFromCollection,
-  getAllPatterns, savePattern, updatePattern, deletePattern,
-  getAllGroups, saveGroup, updateGroup, deleteGroup,
-  findSimilarChartScreenshots, computePatternPerformance, computePatternBySession,
-  computePatternByDay, detectVisualMistakes, detectVisualStrengths,
-  computeOutcomeDistribution, generateVisualBriefing, getScreenshotStats,
-} from '../services/screenshotIntelligenceService';
-import { assessImageQuality } from '../services/visualAnalysisService';
-import { compressImage } from '../lib/imageCompression';
-import {
-  ChartScreenshotType, PatternTag, PATTERN_TAG_LABELS,
-  SCREENSHOT_TYPE_LABELS, SESSION_LABELS, RepeatedPattern,
-  PatternPerformanceStats,
-} from '../types/chartScreenshot';
-import { VisualFeature, ScreenshotAnnotation, FEATURE_CATEGORIES, FEATURE_LABELS } from '../types/screenshot';
-import AnnotationCanvas from '../components/AnnotationCanvas';
-import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
-import { Badge } from '../components/ui/badge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { Textarea } from '../components/ui/textarea';
-import { Label } from '../components/ui/label';
-import { cn } from '../lib/utils';
-
-// ── Helpers ────────────────────────────────────────────────────────
-
-function uid() { return crypto.randomUUID(); }
-function safeJson<T>(str: string | null | undefined, fallback: T): T {
-  if (!str) return fallback;
-  try { return JSON.parse(str) as T; } catch { return fallback; }
-}
-
-const ALL_PATTERN_TAGS: PatternTag[] = [
-  'breakout', 'pullback', 'reversal', 'continuation', 'range',
-  'liquidity-sweep', 'compression', 'expansion', 'trend', 'countertrend',
-];
-
-const RESULT_COLORS: Record<string, string> = {
-  win: 'text-green-400', loss: 'text-red-400', breakeven: 'text-slate-400',
-  'partial-win': 'text-emerald-400', 'partial-loss': 'text-orange-400',
-};
-
-// ── Tab type ────────────────────────────────────────────────────────
-type Tab = 'gallery' | 'groups' | 'patterns' | 'collections' | 'analytics' | 'briefing';
-
-// ── Main page ────────────────────────────────────────────────────────
-export default function ScreenshotIntelligence() {
-  const [activeTab, setActiveTab] = useState<Tab>('gallery');
-  const qc = useQueryClient();
-
-  const { data: allTrades = [] } = useQuery<Trade[]>({
-    queryKey: ['trades'],
-    queryFn: () => db.trades.toArray(),
-  });
-
-  const { data: stats } = useQuery({
-    queryKey: ['screenshot-stats'],
-    queryFn: getScreenshotStats,
-  });
-
-  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
-    { id: 'gallery', label: 'گالری', icon: Grid3x3 },
-    { id: 'groups', label: 'گروه‌ها', icon: Layers },
-    { id: 'patterns', label: 'کتابخانه الگو', icon: BookOpen },
-    { id: 'collections', label: 'کالکشن‌ها', icon: FolderOpen },
-    { id: 'analytics', label: 'تحلیل عملکرد', icon: BarChart3 },
-    { id: 'briefing', label: 'بریفینگ بصری', icon: Brain },
-  ];
-
-  return (
-    <div className="min-h-full p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
-      {/* هدر */}
-      <div className="space-y-1">
-        <h1 className="text-2xl font-bold flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-violet-500/20 flex items-center justify-center">
-            <Camera className="w-5 h-5 text-violet-400" />
-          </div>
-          هوش اسکرین‌شات چارت
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          آپلود، تحلیل، مقایسه و جستجوی الگوهای بصری — کاملاً آفلاین
-        </p>
-      </div>
-
-      {/* آمار سریع */}
-      {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[
-            { label: 'اسکرین‌شات', value: stats.totalScreenshots, icon: ImageIcon, color: 'text-violet-400' },
-            { label: 'گروه MTF', value: stats.totalGroups, icon: Layers, color: 'text-blue-400' },
-            { label: 'الگوی شخصی', value: stats.totalPatterns, icon: BookOpen, color: 'text-amber-400' },
-            { label: 'کالکشن', value: stats.totalCollections, icon: FolderOpen, color: 'text-green-400' },
-          ].map(s => (
-            <Card key={s.label} className="border-white/8">
-              <CardContent className="p-3 flex items-center gap-3">
-                <s.icon className={cn('w-5 h-5 shrink-0', s.color)} />
-                <div>
-                  <p className="text-xl font-bold">{s.value}</p>
-                  <p className="text-xs text-muted-foreground">{s.label}</p>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* تب‌ها */}
-      <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-hide border-b border-white/8">
-        {tabs.map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              'flex items-center gap-2 px-3 py-2 rounded-t-md text-sm font-medium whitespace-nowrap transition-colors border-b-2',
-              activeTab === tab.id
-                ? 'text-primary border-primary bg-primary/5'
-                : 'text-muted-foreground border-transparent hover:text-foreground'
-            )}
-          >
-            <tab.icon className="w-4 h-4 shrink-0" />
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* محتوا */}
-      <div>
-        {activeTab === 'gallery' && <GalleryTab allTrades={allTrades} onRefresh={() => qc.invalidateQueries({ queryKey: ['screenshot-stats'] })} />}
-        {activeTab === 'groups' && <GroupsTab />}
-        {activeTab === 'patterns' && <PatternsTab allTrades={allTrades} />}
-        {activeTab === 'collections' && <CollectionsTab />}
-        {activeTab === 'analytics' && <AnalyticsTab allTrades={allTrades} />}
-        {activeTab === 'briefing' && <BriefingTab allTrades={allTrades} />}
-      </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════════
-// TAB: GALLERY
-// ════════════════════════════════════════════════════════════════════
-
-function GalleryTab({ allTrades, onRefresh }: { allTrades: Trade[]; onRefresh: () => void }) {
-  const [filterSymbol, setFilterSymbol] = useState('');
-  const [filterType, setFilterType] = useState<ChartScreenshotType | 'all'>('all');
-  const [filterTag, setFilterTag] = useState<string>('all');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showUpload, setShowUpload] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const qc = useQueryClient();
-
-  const { data: screenshots = [] } = useQuery<ChartScreenshot[]>({
-    queryKey: ['chart-screenshots'],
-    queryFn: getAllChartScreenshots,
-  });
-
-  const { data: collections = [] } = useQuery<ScreenshotCollection[]>({
-    queryKey: ['screenshot-collections'],
-    queryFn: getAllCollections,
-  });
-
-  const filtered = useMemo(() => {
-    return screenshots.filter(ss => {
-      if (filterSymbol && ss.symbol?.toLowerCase() !== filterSymbol.toLowerCase()) return false;
-      if (filterType !== 'all' && ss.screenshotType !== filterType) return false;
-      if (filterTag !== 'all') {
-        const tags = safeJson<string[]>(ss.patternTags, []);
-        const custom = safeJson<string[]>(ss.customTags, []);
-        if (!tags.includes(filterTag) && !custom.includes(filterTag)) return false;
-      }
-      return true;
-    });
-  }, [screenshots, filterSymbol, filterType, filterTag]);
-
-  const selected = selectedId ? screenshots.find(s => s.id === selectedId) : null;
-
-  const handleFiles = useCallback(async (files: File[]) => {
-    setIsProcessing(true);
-    try {
-      for (const file of files) {
-        if (!file.type.startsWith('image/')) { toast.error(`${file.name} تصویر نیست`); continue; }
-        let dataUrl: string;
-        try {
-          const c = await compressImage(file, { maxWidth: 1600, maxHeight: 1200, quality: 0.85 });
-          dataUrl = c.dataUrl;
-        } catch {
-          const reader = new FileReader();
-          dataUrl = await new Promise<string>(res => { reader.onload = () => res(reader.result as string); reader.readAsDataURL(file); });
-        }
-        const quality = await assessImageQuality(dataUrl, file.size);
-        await saveChartScreenshot({
-          symbol: null, timeframe: null, date: null, time: null, timezone: null,
-          session: null, direction: null, setup: null, strategy: null, tradeId: null,
-          screenshotType: 'pre-trade', label: file.name.replace(/\.[^.]+$/, ''),
-          notes: null, dataUrl,
-          width: quality.width, height: quality.height, fileSize: file.size,
-          quality: JSON.stringify(quality),
-          extractedFeatures: '[]', userAddedFeatures: '[]',
-          patternTags: '[]', customTags: '[]', annotations: '[]',
-          analysisNotes: null, groupId: null, collectionIds: '[]', linkedKnowledgeIds: '[]',
-          imageBlob: null,
-        });
-      }
-      await qc.invalidateQueries({ queryKey: ['chart-screenshots'] });
-      onRefresh();
-      toast.success('اسکرین‌شات‌ها اضافه شدند');
-    } finally { setIsProcessing(false); }
-  }, [qc, onRefresh]);
-
-  const handleDelete = async (id: string) => {
-    await deleteChartScreenshot(id);
-    await qc.invalidateQueries({ queryKey: ['chart-screenshots', 'screenshot-collections'] });
-    onRefresh();
-    if (selectedId === id) setSelectedId(null);
-    toast.success('اسکرین‌شات حذف شد');
-  };
-
-  return (
-    <div className="space-y-4">
-      {/* نوار ابزار */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <Button size="sm" className="gap-2" onClick={() => fileInputRef.current?.click()} disabled={isProcessing}>
-          <Upload className="w-4 h-4" />
-          {isProcessing ? 'در حال پردازش...' : 'آپلود اسکرین‌شات'}
-        </Button>
-        <input ref={fileInputRef} type="file" accept="image/png,image/jpg,image/jpeg,image/webp" multiple className="hidden"
-          onChange={e => { const f = Array.from(e.target.files ?? []); if (f.length) handleFiles(f); e.target.value = ''; }} />
-        <Input placeholder="فیلتر نماد..." value={filterSymbol} onChange={e => setFilterSymbol(e.target.value)} className="w-32 h-8 text-sm" />
-        <Select value={filterType} onValueChange={v => setFilterType(v as any)}>
-          <SelectTrigger className="w-36 h-8 text-xs"><SelectValue placeholder="نوع" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">همه انواع</SelectItem>
-            {Object.entries(SCREENSHOT_TYPE_LABELS).map(([k, v]) => <SelectItem key={k} value={k}>{v}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <Select value={filterTag} onValueChange={setFilterTag}>
-          <SelectTrigger className="w-36 h-8 text-xs"><SelectValue placeholder="تگ الگو" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">همه الگوها</SelectItem>
-            {ALL_PATTERN_TAGS.map(t => <SelectItem key={t} value={t}>{PATTERN_TAG_LABELS[t]}</SelectItem>)}
-          </SelectContent>
-        </Select>
-        <span className="text-xs text-muted-foreground mr-auto">{filtered.length} اسکرین‌شات</span>
-      </div>
-
-      {/* ناحیه درگ اند دراپ */}
-      <div
-        className="border-2 border-dashed border-white/15 rounded-xl p-4 text-center text-muted-foreground text-sm hover:border-white/30 transition-colors cursor-pointer"
-        onDragOver={e => e.preventDefault()}
-        onDrop={e => { e.preventDefault(); handleFiles(Array.from(e.dataTransfer.files)); }}
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <Camera className="w-6 h-6 mx-auto mb-2 opacity-40" />
-        <p>اسکرین‌شات را اینجا رها کنید یا کلیک کنید</p>
-        <p className="text-xs mt-1">PNG · JPG · JPEG · WEBP — داده‌ها فقط به صورت محلی ذخیره می‌شوند</p>
-      </div>
-
-      {/* گرید اسکرین‌شات‌ها */}
-      {filtered.length === 0 ? (
-        <div className="text-center py-16 text-muted-foreground">
-          <ImageIcon className="w-12 h-12 mx-auto mb-3 opacity-20" />
-          <p className="text-sm">هنوز اسکرین‌شاتی اضافه نشده</p>
-          <p className="text-xs mt-1">اولین اسکرین‌شات چارت خود را آپلود کنید</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-          {filtered.map(ss => (
-            <ScreenshotCard
-              key={ss.id}
-              ss={ss}
-              isSelected={selectedId === ss.id}
-              onSelect={() => setSelectedId(s => s === ss.id ? null : ss.id)}
-              onDelete={() => handleDelete(ss.id)}
-              collections={collections}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* پنل جزئیات */}
-      {selected && (
-        <ScreenshotDetailPanel
-          ss={selected}
-          allTrades={allTrades}
-          allScreenshots={screenshots}
-          onClose={() => setSelectedId(null)}
-          onUpdate={async (patch) => {
-            await updateChartScreenshot(selected.id, patch);
-            await qc.invalidateQueries({ queryKey: ['chart-screenshots'] });
-          }}
-          collections={collections}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── Screenshot Card ───────────────────────────────────────────────
-
-function ScreenshotCard({ ss, isSelected, onSelect, onDelete, collections }: {
-  ss: ChartScreenshot;
-  isSelected: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-  collections: ScreenshotCollection[];
-}) {
-  const tags = safeJson<string[]>(ss.patternTags, []);
-  const quality = safeJson<any>(ss.quality, null);
-  const qScore = quality?.score ?? null;
-
-  return (
-    <div
-      className={cn(
-        'group relative rounded-xl border overflow-hidden cursor-pointer transition-all',
-        isSelected ? 'border-primary ring-1 ring-primary/30' : 'border-white/10 hover:border-white/25'
-      )}
-      onClick={onSelect}
-    >
-      <div className="aspect-video relative overflow-hidden bg-black/20">
-        <img src={ss.dataUrl} alt={ss.label ?? ''} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
-        {qScore !== null && (
-          <span className={cn('absolute top-1.5 right-1.5 text-[10px] px-1 py-0.5 rounded bg-black/70 font-mono',
-            qScore >= 70 ? 'text-green-400' : qScore >= 40 ? 'text-amber-400' : 'text-red-400')}>
-            {qScore}
-          </span>
-        )}
-        {ss.timeframe && (
-          <span className="absolute top-1.5 left-1.5 text-[10px] px-1.5 py-0.5 rounded bg-primary/80 text-white font-mono">
-            {ss.timeframe}
-          </span>
-        )}
-        {ss.screenshotType && (
-          <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
-            <span className="text-[10px] text-white">{SCREENSHOT_TYPE_LABELS[ss.screenshotType as ChartScreenshotType] ?? ss.screenshotType}</span>
-          </div>
-        )}
-        <button
-          className="absolute top-1.5 left-1.5 opacity-0 group-hover:opacity-100 w-5 h-5 bg-red-500/80 hover:bg-red-500 rounded flex items-center justify-center transition-opacity"
-          onClick={e => { e.stopPropagation(); onDelete(); }}
-        >
-          <X className="w-3 h-3 text-white" />
-        </button>
-      </div>
-      <div className="px-2 py-1.5">
-        <p className="text-xs truncate font-medium">{ss.label ?? 'اسکرین‌شات'}</p>
-        {ss.symbol && <p className="text-[10px] text-muted-foreground">{ss.symbol}</p>}
-        {tags.length > 0 && (
-          <div className="flex gap-1 mt-1 flex-wrap">
-            {tags.slice(0, 2).map(t => (
-              <span key={t} className="text-[9px] px-1 py-0.5 rounded bg-violet-500/20 text-violet-300">{PATTERN_TAG_LABELS[t] ?? t}</span>
-            ))}
-            {tags.length > 2 && <span className="text-[9px] text-muted-foreground">+{tags.length - 2}</span>}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Screenshot Detail Panel ────────────────────────────────────────
-
-function ScreenshotDetailPanel({ ss, allTrades, allScreenshots, onClose, onUpdate, collections }: {
-  ss: ChartScreenshot;
-  allTrades: Trade[];
-  allScreenshots: ChartScreenshot[];
-  onClose: () => void;
-  onUpdate: (patch: Partial<ChartScreenshot>) => Promise<void>;
-  collections: ScreenshotCollection[];
-}) {
-  const [tab, setTab] = useState<'meta' | 'tags' | 'annotate' | 'similar' | 'compare'>('meta');
-  const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({
-    symbol: ss.symbol ?? '',
-    timeframe: ss.timeframe ?? '',
-    date: ss.date ?? '',
-    time: ss.time ?? '',
-    session: ss.session ?? '',
-    direction: ss.direction ?? '',
-    setup: ss.setup ?? '',
-    screenshotType: ss.screenshotType,
-    label: ss.label ?? '',
-    notes: ss.notes ?? '',
-  });
-  const [patternTags, setPatternTags] = useState<string[]>(safeJson<string[]>(ss.patternTags, []));
-  const [customTag, setCustomTag] = useState('');
-  const [customTags, setCustomTags] = useState<string[]>(safeJson<string[]>(ss.customTags, []));
-  const [annotations, setAnnotations] = useState<ScreenshotAnnotation[]>(safeJson<ScreenshotAnnotation[]>(ss.annotations, []));
-  const [similarMatches, setSimilarMatches] = useState<any[]>([]);
-  const qc = useQueryClient();
-
-  useEffect(() => {
-    if (tab === 'similar') {
-      findSimilarChartScreenshots(ss.id, { minScore: 20, limit: 8 }).then(setSimilarMatches);
-    }
-  }, [tab, ss.id]);
-
-  const save = async () => {
-    await onUpdate({
-      ...form,
-      symbol: form.symbol || null,
-      timeframe: form.timeframe || null,
-      date: form.date || null,
-      time: form.time || null,
-      session: form.session || null,
-      direction: form.direction || null,
-      setup: form.setup || null,
-      notes: form.notes || null,
-      label: form.label || null,
-      patternTags: JSON.stringify(patternTags),
-      customTags: JSON.stringify(customTags),
-      annotations: JSON.stringify(annotations),
-    });
-    setEditing(false);
-    toast.success('ذخیره شد');
-  };
-
-  const saveAnnotations = async () => {
-    await onUpdate({ annotations: JSON.stringify(annotations) });
-    toast.success('حاشیه‌نویسی ذخیره شد');
-  };
-
-  const toggleTag = (tag: string) => {
-    setPatternTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
-  };
-  const addCustomTag = () => {
-    if (customTag.trim() && !customTags.includes(customTag.trim())) {
-      setCustomTags(prev => [...prev, customTag.trim()]);
-      setCustomTag('');
-    }
-  };
-
-  const tabs2 = [
-    { id: 'meta', label: 'متادیتا' },
-    { id: 'tags', label: 'تگ‌ها' },
-    { id: 'annotate', label: 'حاشیه‌نویسی' },
-    { id: 'similar', label: 'مشابه' },
-  ];
-
-  return (
-    <div className="rounded-xl border border-primary/30 bg-card overflow-hidden">
-      {/* هدر */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/8 bg-primary/5">
-        <div className="flex items-center gap-2">
-          <h3 className="font-semibold text-sm">{ss.label ?? 'اسکرین‌شات'}</h3>
-          {ss.symbol && <Badge variant="secondary" className="text-xs">{ss.symbol}</Badge>}
-        </div>
-        <div className="flex items-center gap-2">
-          {editing ? (
-            <>
-              <Button size="sm" variant="ghost" onClick={() => setEditing(false)} className="text-xs h-7">لغو</Button>
+nt="ghost" onClick={() => setEditing(false)} className="text-xs h-7">لغو</Button>
               <Button size="sm" onClick={save} className="text-xs h-7 gap-1"><Save className="w-3 h-3" />ذخیره</Button>
             </>
           ) : (
@@ -485,7 +11,14 @@ function ScreenshotDetailPanel({ ss, allTrades, allScreenshots, onClose, onUpdat
       <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* تصویر */}
         <div className="rounded-lg overflow-hidden border border-white/10">
-          <img src={ss.dataUrl} alt={ss.label ?? ''} className="w-full h-auto max-h-72 object-contain bg-black/30" />
+          <StoredImage
+            source={ss}
+            alt={ss.label ?? ''}
+            enableViewer
+            showDownload
+            filename={ss.label || 'chart-screenshot'}
+            className="w-full h-auto max-h-72 object-contain bg-black/30"
+          />
         </div>
 
         {/* پنل تب‌دار */}
@@ -633,7 +166,7 @@ function ScreenshotDetailPanel({ ss, allTrades, allScreenshots, onClose, onUpdat
               <p className="text-xs text-muted-foreground">تصویر اصلی دست‌نخورده می‌ماند — حاشیه‌نویسی‌ها جداگانه ذخیره می‌شوند</p>
               <div className="rounded-lg overflow-hidden border border-white/10">
                 <AnnotationCanvas
-                  imageDataUrl={ss.dataUrl}
+                  imageDataUrl={annotationImageUrl ?? ''}
                   annotations={annotations}
                   onChange={setAnnotations}
                 />
@@ -658,7 +191,7 @@ function ScreenshotDetailPanel({ ss, allTrades, allScreenshots, onClose, onUpdat
                     {similarMatches.map(m => (
                       <div key={m.screenshotId} className="rounded-lg border border-white/10 overflow-hidden">
                         <div className="aspect-video relative overflow-hidden">
-                          <img src={m.dataUrl} alt="" className="w-full h-full object-cover" />
+                          <StoredImage source={m} alt="" className="w-full h-full object-cover" />
                           <span className="absolute top-1 right-1 text-[10px] px-1 py-0.5 rounded bg-black/70 text-white">{m.matchScore}٪</span>
                         </div>
                         <div className="p-1.5 text-xs">
@@ -791,7 +324,7 @@ function GroupsTab() {
                       {ssInGroup.map(ss => (
                         <div key={ss.id} className="relative group rounded-lg overflow-hidden border border-white/10">
                           <div className="aspect-video">
-                            <img src={ss.dataUrl} alt={ss.label ?? ''} className="w-full h-full object-cover" />
+                            <StoredImage source={ss} alt={ss.label ?? ''} className="w-full h-full object-cover" />
                           </div>
                           <div className="absolute bottom-0 inset-x-0 bg-black/60 px-1.5 py-1">
                             <p className="text-[9px] text-white truncate">{ss.timeframe ?? ss.label ?? '—'}</p>
@@ -1003,7 +536,7 @@ function PatternsTab({ allTrades }: { allTrades: Trade[] }) {
                     <div className="grid grid-cols-3 gap-1.5">
                       {ssInPattern.slice(0, 6).map(ss => (
                         <div key={ss.id} className="aspect-video rounded overflow-hidden border border-white/10">
-                          <img src={ss.dataUrl} alt="" className="w-full h-full object-cover" />
+                          <StoredImage source={ss} alt="" className="w-full h-full object-cover" />
                         </div>
                       ))}
                     </div>
@@ -1128,7 +661,7 @@ function CollectionsTab() {
                   <div className="grid grid-cols-2 gap-1">
                     {preview.map(ss => (
                       <div key={ss.id} className="aspect-video rounded overflow-hidden bg-black/20">
-                        <img src={ss.dataUrl} alt="" className="w-full h-full object-cover" />
+                        <StoredImage source={ss} alt="" className="w-full h-full object-cover" />
                       </div>
                     ))}
                   </div>
@@ -1170,7 +703,7 @@ function CollectionsTab() {
                 {colScreenshots.map(ss => (
                   <div key={ss.id} className="relative group rounded-lg overflow-hidden border border-white/10">
                     <div className="aspect-video">
-                      <img src={ss.dataUrl} alt={ss.label ?? ''} className="w-full h-full object-cover" />
+                      <StoredImage source={ss} alt={ss.label ?? ''} className="w-full h-full object-cover" />
                     </div>
                     <div className="p-1.5 text-xs">
                       <p className="truncate">{ss.label ?? 'اسکرین‌شات'}</p>
@@ -1454,6 +987,9 @@ function BriefingTab({ allTrades }: { allTrades: Trade[] }) {
     try {
       const result = await generateVisualBriefing(symbol || null, setup || null, selectedTags, allTrades);
       setBriefing(result);
+    } catch (error) {
+      console.error('[ScreenshotIntelligence] briefing generation failed', error);
+      toast.error('تولید بریفینگ بصری انجام نشد');
     } finally {
       setIsLoading(false);
     }
@@ -1528,7 +1064,7 @@ function BriefingTab({ allTrades }: { allTrades: Trade[] }) {
                   {briefing.similarScreenshots.map((m: any) => (
                     <div key={m.screenshotId} className="rounded-lg border border-white/10 overflow-hidden">
                       <div className="aspect-video relative">
-                        <img src={m.dataUrl} alt="" className="w-full h-full object-cover" />
+                        <StoredImage source={m} alt="" className="w-full h-full object-cover" />
                         <span className="absolute top-1 right-1 text-[10px] px-1 py-0.5 rounded bg-black/70 text-white">{m.matchScore}٪</span>
                       </div>
                       <div className="p-1.5 text-xs">
