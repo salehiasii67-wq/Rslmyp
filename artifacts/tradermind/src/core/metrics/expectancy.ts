@@ -7,7 +7,7 @@
  */
 
 import { Trade } from '../../db/database';
-import { isClosed, isWin, isLoss } from '../../lib/tradeHelpers';
+import { isClosed, isWin, isLoss, netPnl } from '../../lib/tradeHelpers';
 
 export interface ExpectancyResult {
   expectancy: number | null;        // بر حسب R
@@ -43,8 +43,8 @@ export function computeExpectancy(trades: Trade[]): ExpectancyResult {
   }
 
   // PnL-based
-  const winPnls = wins.filter(t => t.profitLoss !== null).map(t => t.profitLoss!);
-  const lossPnls = losses.filter(t => t.profitLoss !== null).map(t => t.profitLoss!);
+  const winPnls = wins.filter(t => t.profitLoss !== null).map(netPnl);
+  const lossPnls = losses.filter(t => t.profitLoss !== null).map(netPnl);
   const avgWinPnl = winPnls.length ? winPnls.reduce((s, v) => s + v, 0) / winPnls.length : null;
   const avgLossPnl = lossPnls.length ? lossPnls.reduce((s, v) => s + v, 0) / lossPnls.length : null;
 
