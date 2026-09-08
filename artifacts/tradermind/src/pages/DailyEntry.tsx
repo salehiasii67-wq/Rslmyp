@@ -15,6 +15,8 @@ import {
 import { toast } from "sonner";
 import { t, formatDateFullFa, toDateStr } from "../lib/i18n";
 import { cn } from "../lib/utils";
+import { useNavigationGuard } from "../navigation/NavigationGuard";
+import { useAppStore } from "../store/useAppStore";
 
 // ================================================================
 // کامپوننت‌های کمکی
@@ -234,6 +236,7 @@ function formToJournal(form: FormData, date: string): Omit<DailyJournal, 'id' | 
 export default function DailyEntry() {
   const { date } = useParams<{ date: string }>();
   const [, setLocation] = useLocation();
+  const journalAutosave = useAppStore(s => s.journalAutosave);
 
   const [form, setForm] = useState<FormData>(defaultForm);
   const [customEmotions, setCustomEmotions] = useState<string[]>([]);
@@ -245,6 +248,7 @@ export default function DailyEntry() {
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [existingId, setExistingId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedFormRef = useRef<FormData | null>(null);
 
   // بارگذاری اطلاعات
   useEffect(() => {
@@ -256,7 +260,10 @@ export default function DailyEntry() {
       ]);
       if (existing) {
         setForm(journalToForm(existing));
+        lastSavedFormRef.current = journalToForm(existing);
         setExistingId(existing.id);
+      } else {
+        lastSavedFormRef.current = defaultForm;
       }
       setTrades(dayTrades);
       setHasLoaded(true);
@@ -270,6 +277,7 @@ export default function DailyEntry() {
     setIsSaving(true);
     try {
       const saved = await journalService.saveJournal(formToJournal(formData, date));
+      lastSavedFormRef.current = formData;
       setExistingId(saved.id);
       setLastSaved(new Date().toLocaleTimeString('fa-IR'));
       if (!silent) toast.success(t.common.savedSuccess);
@@ -280,13 +288,22 @@ export default function DailyEntry() {
     }
   }, [date]);
 
+  useNavigationGuard({
+    isDirty: hasLoaded && JSON.stringify(form) !== JSON.stringify(lastSavedFormRef.current),
+    onSave: async () => { await saveJournal(form, false); },
+  });
+
   // Autosave
   useEffect(() => {
     if (!hasLoaded) return;
+    if (!journalAutosave) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      return;
+    }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => saveJournal(form, true), 1500);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [form, hasLoaded]);
+  }, [form, hasLoaded, journalAutosave, saveJournal]);
 
   const update = <K extends keyof FormData>(key: K, value: FormData[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
