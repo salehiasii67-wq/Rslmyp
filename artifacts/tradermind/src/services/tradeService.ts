@@ -3,6 +3,7 @@ import { isWin, isClosed } from '../lib/tradeHelpers';
 import { strategyService } from './strategyService';
 import { analysisService } from './analysisService';
 import { tradeVersionService, tradeEventService } from './tradeEventService';
+import { detectTradingSession, getTradeNetPnl } from '../lib/tradeClassification';
 
 const defaultReview = JSON.stringify({ didWell: '', didWrong: '', learned: '', wouldTakeAgain: null, validSetup: null });
 const defaultPostTradeReviewStr = JSON.stringify(defaultPostTradeReview);
@@ -10,6 +11,14 @@ const defaultPostTradeReviewStr = JSON.stringify(defaultPostTradeReview);
 export const tradeService = {
   async getAllTrades() {
     return db.trades.orderBy('openedAt').reverse().toArray();
+  },
+
+  async getTradesByDateRange(from: number, to: number) {
+    return db.trades
+      .where('openedAt')
+      .between(from, to, true, true)
+      .reverse()
+      .toArray();
   },
 
   async getTradeById(id: string) {
@@ -23,11 +32,34 @@ export const tradeService = {
   async createTrade(data: Partial<Trade> = {}): Promise<Trade> {
     const id = crypto.randomUUID();
     const now = Date.now();
+    // تنظیمات پیش‌فرض از localStorage خوانده می‌شوند تا سرویس دیتابیس
+    // به React وابسته نباشد و در Electron/Capacitor هم یکسان کار کند.
+    let defaults: Partial<Trade> = {};
+    try {
+      const stored = JSON.parse(localStorage.getItem('tradermind-app-storage') ?? '{}')?.state;
+      defaults = {
+        accountId: stored?.defaultAccountId ?? null,
+        boxId: stored?.defaultTradingBoxId ?? null,
+        symbol: stored?.defaultSymbol ?? '',
+        market: stored?.defaultMarket ?? null,
+      };
+    } catch { /* تنظیمات خراب نباید ثبت معامله را متوقف کند */ }
+
+    // تنظیمات ممکن است به حساب یا باکسی اشاره کنند که بعداً حذف شده است.
+    // در این حالت معامله جدید باید بدون شناسه‌ی نامعتبر ساخته شود.
+    const [defaultAccount, defaultBox] = await Promise.all([
+      defaults.accountId ? db.accounts.get(defaults.accountId) : Promise.resolve(undefined),
+      defaults.boxId ? db.tradingBoxes.get(defaults.boxId) : Promise.resolve(undefined),
+    ]);
+    defaults.accountId = defaultAccount?.id ?? null;
+    defaults.boxId = defaultBox?.id ?? null;
+
     const trade: Trade = {
       sessionId: null, strategyId: null, symbol: '', market: null,
       direction: 'long', entryPrice: 0, exitPrice: null, stopLoss: 0,
       takeProfit: null, positionSize: null, riskPercentage: null, riskAmount: null,
-      rMultiple: null, result: 'open', profitLoss: null, fees: null, status: 'open',
+       rMultiple: null, result: 'open', profitLoss: null, fees: null, commission: null, spread: null,
+       ticketNumber: null, status: 'open',
       openedAt: now, closedAt: null, reasonForExit: null,
       emotions: '[]', emotionNotes: null, notes: null,
       screenshots: '[]', adherenceScore: null, adherenceRating: null,
@@ -35,15 +67,17 @@ export const tradeService = {
       tags: '[]', liveMonitoring: null, createdAt: now,
       plannedEntry: null, plannedSL: null, plannedTP: null, plannedRR: null,
       plannedRisk: null, plannedPositionSize: null,
-      tradingSession: null, setupType: null, timezone: null,
+      setupType: null, timezone: null,
       entryReason: null, lesson: null,
       slMoved: null, tpMoved: null, partialClose: null, addedToPosition: null,
       reducedPosition: null, manualExit: null, managementReason: null,
       mtfAnalysis: null,
+      ...defaults,
       ...data,
       id,
-      accountId: data.accountId ?? null,
-      boxId: data.boxId ?? null,
+      accountId: data.accountId ?? defaults.accountId ?? null,
+      boxId: data.boxId ?? defaults.boxId ?? null,
+      tradingSession: data.tradingSession ?? detectTradingSession(data.openedAt ?? now),
     };
 
     await db.transaction('rw', [db.trades, db.tradeEvents, db.tradeVersions], async () => {
@@ -81,8 +115,7 @@ export const tradeService = {
   async updateTrade(id: string, data: Partial<Trade>) {
     const existing = await db.trades.get(id);
     if (!existing) {
-      await db.trades.update(id, data);
-      return db.trades.get(id);
+      throw new Error(`معامله با شناسهٔ ${id} پیدا نشد و به‌روزرسانی انجام نشد.`);
     }
 
     await db.transaction('rw', [db.trades, db.tradeVersions, db.tradeEvents], async () => {
@@ -183,7 +216,7 @@ export const tradeService = {
     return {
       total: trades.length,
       winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
-      totalPnl: trades.reduce((acc, t) => acc + (t.profitLoss || 0) - (t.fees || 0), 0),
+      totalPnl: trades.reduce((acc, t) => acc + (getTradeNetPnl(t) ?? 0), 0),
       avgRMultiple: withR.length > 0 ? withR.reduce((acc, t) => acc + (t.rMultiple || 0), 0) / withR.length : 0,
       closedCount: closed.length,
       openCount: trades.filter(t => t.status === 'open').length,
