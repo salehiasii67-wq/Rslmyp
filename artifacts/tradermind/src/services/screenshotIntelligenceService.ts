@@ -7,6 +7,7 @@
 
 import { db, ChartScreenshot, ScreenshotGroup, VisualPattern, ScreenshotCollection, Trade } from '../db/database';
 import { median, isWin, isLoss, isClosed } from '../lib/tradeHelpers';
+import { getTradingDateParts } from '../lib/tradingTime';
 import { VisualFeature } from '../types/screenshot';
 import {
   PatternPerformanceStats,
@@ -291,6 +292,7 @@ export async function findSimilarChartScreenshots(
       matchScore: score,
       matchedTags,
       dataUrl: ss.dataUrl,
+      imageBlob: ss.imageBlob ?? null,
       label: ss.label,
       linkedTradeId: ss.tradeId,
       createdAt: ss.createdAt,
@@ -406,7 +408,7 @@ export function computePatternByDay(trades: Trade[], tag: string): PatternByDay[
   for (let day = 0; day <= 6; day++) {
     const dayTrades = closedTrades.filter(t => {
       const tags = safeJson<string[]>(t.tags, []);
-      const d = new Date(t.openedAt).getDay();
+      const d = getTradingDateParts(t.openedAt).dayOfWeek;
       return tags.includes(tag) && d === day;
     });
     if (dayTrades.length === 0) continue;
@@ -426,7 +428,11 @@ export function computePatternByDay(trades: Trade[], tag: string): PatternByDay[
 /** عملکرد یک تگ به تفکیک تایم‌فریم */
 export async function computePatternByTimeframe(trades: Trade[], tag: string): Promise<PatternByTimeframe[]> {
   const closedTrades = trades.filter(t => isClosed(t) && t.mtfAnalysis);
-  const chartSS = await db.chartScreenshots.where('patternTags').equals(tag).toArray();
+  // patternTags is stored as a JSON string, not an indexed field —
+  // must use filter() instead of where().equals() to avoid Dexie error
+  const chartSS = await db.chartScreenshots
+    .filter(ss => safeJson<string[]>(ss.patternTags, []).includes(tag))
+    .toArray();
 
   // جمع‌آوری تایم‌فریم‌ها از اسکرین‌شات‌های مستقل
   const tfCounts: Record<string, { wins: number; total: number; rVals: number[] }> = {};
@@ -666,6 +672,7 @@ export async function generateVisualBriefing(
         matchScore: score,
         matchedTags,
         dataUrl: ss.dataUrl,
+        imageBlob: ss.imageBlob ?? null,
         label: ss.label,
         linkedTradeId: ss.tradeId,
         createdAt: ss.createdAt,
