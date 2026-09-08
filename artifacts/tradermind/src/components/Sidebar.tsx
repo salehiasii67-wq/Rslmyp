@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from "../store/useAppStore";
@@ -28,9 +29,11 @@ import {
   HeartPulse,
   CreditCard,
   Box,
+  Bell,
 } from "lucide-react";
 
 import { cn } from "../lib/utils";
+import { DISPLAY_VERSION } from "../constants/version";
 import { Button } from "./ui/button";
 import { t } from "../lib/i18n";
 
@@ -55,7 +58,7 @@ function NavItem({
     <Link
       href={href}
       className={cn(
-        "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors text-sm font-medium min-h-[44px]",
+        "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all text-sm font-medium min-h-[44px]",
         isActive
           ? "bg-primary/10 text-primary"
           : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
@@ -114,6 +117,23 @@ export function Sidebar() {
   const { sidebarOpen, setSidebarOpen, appName } = useAppStore(
     useShallow(s => ({ sidebarOpen: s.sidebarOpen, setSidebarOpen: s.setSidebarOpen, appName: s.appName }))
   );
+
+  // Drawer موبایل نباید از اجرای قبلی یا حالت پس‌زمینهٔ Android به صفحه
+  // نشت کند. در دسکتاپ این state روی نمایش Sidebar اثری ندارد.
+  useEffect(() => {
+    setSidebarOpen(false);
+
+    const closeWhenHidden = () => {
+      if (document.hidden) setSidebarOpen(false);
+    };
+    document.addEventListener("visibilitychange", closeWhenHidden);
+    return () => document.removeEventListener("visibilitychange", closeWhenHidden);
+  }, [setSidebarOpen]);
+
+  // تغییر مسیر از هر راهی (Back، deep link یا انتخاب آیتم) Drawer را می‌بندد.
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location, setSidebarOpen]);
 
 
 
@@ -174,16 +194,6 @@ export function Sidebar() {
           href: "/journal/insights",
           icon: Lightbulb,
           label: "نکات معاملاتی",
-        },
-        {
-          href: "/accounts",
-          icon: CreditCard,
-          label: "حساب‌های معاملاتی",
-        },
-        {
-          href: "/trading-boxes",
-          icon: Box,
-          label: "باکس‌های معاملاتی",
         },
       ],
     },
@@ -303,8 +313,18 @@ export function Sidebar() {
 
 
     {
-      title: t.nav.system,
+      title: "مدیریت و پشتیبانی",
       items: [
+        {
+          href: "/accounts",
+          icon: CreditCard,
+          label: "حساب‌های معاملاتی",
+        },
+        {
+          href: "/trading-boxes",
+          icon: Box,
+          label: "باکس‌های معاملاتی",
+        },
         {
           href: "/backup",
           icon: HardDrive,
@@ -314,6 +334,11 @@ export function Sidebar() {
           href: "/settings",
           icon: Settings,
           label: t.nav.settings,
+        },
+        {
+          href: "/reminders",
+          icon: Bell,
+          label: "یادآورها",
         },
       ],
     },
@@ -359,12 +384,13 @@ export function Sidebar() {
             left-0
             right-0
             bottom-0
-            top-14
+             top-16
             bg-background/80
             backdrop-blur-sm
             z-40
             md:hidden
           "
+          aria-hidden="true"
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -374,17 +400,22 @@ export function Sidebar() {
       {/* ── Sidebar دسکتاپ + Drawer موبایل */}
       <aside
         className={cn(
-          "fixed right-0 z-50 w-64 bg-sidebar border-l flex flex-col",
-          "transition-transform duration-300 ease-in-out",
-          "md:translate-x-0",
-          sidebarOpen
-            ? "translate-x-0"
-            : "translate-x-full"
+            "tradermind-mobile-drawer fixed z-50 bg-sidebar/95 border-l flex flex-col"
         )}
         style={{
-          top: "56px",
-          height: "calc(100dvh - 56px)",
+          // Keep the drawer inside the visual viewport on Android WebView.
+          // Explicit physical sides avoid RTL + transform rounding bugs.
+          right: 0,
+          left: "auto",
+          // Layout reserves md:pr-64 (16rem) on desktop; keep both values
+          // identical so the module menu never covers the content column.
+          width: "min(16rem, 100vw)",
+          maxWidth: "100vw",
+           top: "64px",
+           height: "calc(100dvh - 64px)",
         }}
+        data-open={sidebarOpen ? "true" : "false"}
+        dir="rtl"
       >
 
 
@@ -399,7 +430,7 @@ export function Sidebar() {
             shrink-0
           "
           style={{
-            minHeight: "56px",
+            minHeight: "64px",
           }}
         >
 
@@ -414,7 +445,7 @@ export function Sidebar() {
             <div className="
               w-6
               h-6
-              rounded
+             rounded-xl
               bg-primary
               flex
               items-center
@@ -457,7 +488,7 @@ export function Sidebar() {
         <div className="
           flex-1
           overflow-y-auto
-          py-4
+           py-5
         ">
 
           {navGroups.map((group, i) => (
@@ -465,14 +496,14 @@ export function Sidebar() {
             <div
               key={i}
               className="
-                mb-6
+                 mb-7
                 px-3
               "
             >
 
               <h4
                 className="
-                  mb-1.5
+                   mb-2
                   px-3
                   text-xs
                   font-semibold
@@ -529,7 +560,7 @@ export function Sidebar() {
             text-muted-foreground
             text-center
           ">
-            TraderMind • v1.0.0
+            TraderMind • {DISPLAY_VERSION}
           </p>
         </div>
 
@@ -558,7 +589,7 @@ export function Sidebar() {
           gap-3
         "
         style={{
-          height: "56px",
+           height: "64px",
           paddingTop:
             "env(safe-area-inset-top)",
         }}
@@ -613,8 +644,8 @@ export function Sidebar() {
           items-stretch
         "
         style={{
-          height:
-            "calc(56px + env(safe-area-inset-bottom, 0px))",
+           height:
+             "calc(64px + env(safe-area-inset-bottom, 0px))",
 
           paddingBottom:
             "env(safe-area-inset-bottom, 0px)",
