@@ -55,21 +55,23 @@ export function computeRiskMetrics(trades: Trade[]): RiskMetricsResult {
     ? avgRVal / stdDevR
     : null;
 
-  // Sortino Ratio (downside deviation)
-  const downside = Rs.filter(r => r < 0);
-  const downsideStd = stdDev(downside);
-  const sortinoRatio = avgRVal !== null && downsideStd !== null && downsideStd > 0
-    ? avgRVal / downsideStd
+  // Sortino Ratio with standard downside deviation against a 0R target.
+  const downsideDeviation = Rs.length > 0
+    ? Math.sqrt(Rs.reduce((sum, r) => sum + Math.pow(Math.min(0, r), 2), 0) / Rs.length)
+    : null;
+  const sortinoRatio = avgRVal !== null && downsideDeviation !== null && downsideDeviation > 0
+    ? avgRVal / downsideDeviation
     : null;
 
   // Kelly Criterion
-  const wins = closed.filter(t => (t.rMultiple ?? 0) > 0);
-  const losses = closed.filter(t => (t.rMultiple ?? 0) < 0);
-  const winRate = closed.length > 0 ? wins.length / closed.length : null;
+  const rTrades = closed.filter(t => t.rMultiple !== null);
+  const wins = rTrades.filter(t => t.rMultiple! > 0);
+  const losses = rTrades.filter(t => t.rMultiple! < 0);
+  const winRate = rTrades.length > 0 ? wins.length / rTrades.length : null;
   const avgWinR = avg(wins.map(t => t.rMultiple!));
   const avgLossR = avg(losses.map(t => Math.abs(t.rMultiple!)));
-  const kellyPct = winRate !== null && avgWinR !== null && avgLossR !== null && avgLossR > 0
-    ? (winRate / avgLossR - (1 - winRate) / avgWinR) * 100
+  const kellyPct = winRate !== null && avgWinR !== null && avgLossR !== null && avgWinR > 0
+    ? (winRate - (1 - winRate) * (avgLossR / avgWinR)) * 100
     : null;
 
   // توزیع R-Multiple در bucket‌های ۰.۵
