@@ -6,7 +6,7 @@
  */
 
 import { Trade } from '../../db/database';
-import { isClosed } from '../../lib/tradeHelpers';
+import { isClosed, netPnl } from '../../lib/tradeHelpers';
 
 /** نقطه منحنی PnL */
 export interface PnlPoint {
@@ -27,7 +27,7 @@ export function computePnlCurve(trades: Trade[]): PnlPoint[] {
 
   let cumulative = 0;
   return closed.map((t, i) => {
-    const pnl = t.profitLoss!;
+    const pnl = netPnl(t);
     cumulative += pnl;
     return {
       index: i + 1,
@@ -44,14 +44,14 @@ export function computePnlCurve(trades: Trade[]): PnlPoint[] {
 export function computeTotalPnl(trades: Trade[]): number {
   return trades
     .filter(isClosed)
-    .reduce((sum, t) => sum + (t.profitLoss ?? 0), 0);
+    .reduce((sum, t) => sum + netPnl(t), 0);
 }
 
 /** بیشترین سود در یک معامله */
 export function computeMaxWin(trades: Trade[]): number | null {
   const vals = trades
     .filter(isClosed)
-    .map(t => t.profitLoss ?? 0)
+    .map(netPnl)
     .filter(v => v > 0);
   return vals.length ? Math.max(...vals) : null;
 }
@@ -60,7 +60,7 @@ export function computeMaxWin(trades: Trade[]): number | null {
 export function computeMaxLoss(trades: Trade[]): number | null {
   const vals = trades
     .filter(isClosed)
-    .map(t => t.profitLoss ?? 0)
+    .map(netPnl)
     .filter(v => v < 0);
   return vals.length ? Math.min(...vals) : null;
 }
@@ -77,7 +77,7 @@ export function computeMaxDrawdown(trades: Trade[]): { absolute: number; percent
   let maxDD = 0;
 
   for (const t of closed) {
-    equity += t.profitLoss!;
+    equity += netPnl(t);
     if (equity > peak) peak = equity;
     const dd = peak - equity;
     if (dd > maxDD) maxDD = dd;
@@ -92,13 +92,13 @@ export function computeMaxDrawdown(trades: Trade[]): { absolute: number; percent
 /** میانگین سود به ضرر (Avg Win / Avg Loss) */
 export function computeRiskRewardRatio(trades: Trade[]): number | null {
   const closed = trades.filter(isClosed);
-  const wins = closed.filter(t => (t.profitLoss ?? 0) > 0);
-  const losses = closed.filter(t => (t.profitLoss ?? 0) < 0);
+  const wins = closed.filter(t => netPnl(t) > 0);
+  const losses = closed.filter(t => netPnl(t) < 0);
 
   if (!wins.length || !losses.length) return null;
 
-  const avgWin = wins.reduce((s, t) => s + t.profitLoss!, 0) / wins.length;
-  const avgLoss = Math.abs(losses.reduce((s, t) => s + t.profitLoss!, 0) / losses.length);
+  const avgWin = wins.reduce((s, t) => s + netPnl(t), 0) / wins.length;
+  const avgLoss = Math.abs(losses.reduce((s, t) => s + netPnl(t), 0) / losses.length);
 
   return avgLoss > 0 ? avgWin / avgLoss : null;
 }
