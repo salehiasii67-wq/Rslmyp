@@ -1,4 +1,920 @@
-<RuleItem key={n.id} n={n} />)}</div>
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Skeleton } from '../components/ui/skeleton';
+import { knowledgeService, BriefingContext, BriefingSection } from '../services/knowledgeService';
+import { checklistService, DEFAULT_REFLECTION } from '../services/checklistService';
+import {
+  KnowledgeNote, KnowledgeCategory, NoteImportance, NoteSource, NoteStatus, NoteUserFeedback,
+  PreTradeChecklist, ChecklistItemDef, DailyFocus, PostTradingReflection,
+} from '../db/database';
+import { Button } from '../components/ui/button';
+import { Badge } from '../components/ui/badge';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Input } from '../components/ui/input';
+import { Textarea } from '../components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { ScrollArea } from '../components/ui/scroll-area';
+import { useToast } from '../hooks/use-toast';
+import {
+  Brain, BookOpen, Plus, Search, Star, Archive, Clock,
+  ChevronDown, ChevronUp, AlertTriangle, Shield,
+  TrendingUp, TrendingDown, Zap, BarChart3, Calendar, CheckCircle2,
+  XCircle, Pin, Edit2, Trash2, RefreshCw, Sparkles,
+  Award, Target, Info, ListChecks, Focus, GripVertical,
+  Play, Settings2, Flame, CheckSquare, Square, FileText,
+  ArrowUp, ArrowDown, RotateCcw, Activity,
+} from 'lucide-react';
+
+// ── Types ──────────────────────────────────────────────────────────
+
+const IMPORTANCE_CONFIG: Record<NoteImportance, { label: string; color: string; bg: string; icon: React.ElementType; ring: string }> = {
+  critical: { label: 'حیاتی',   color: 'text-red-500',    bg: 'bg-red-500/10 border-red-500/30',    icon: AlertTriangle, ring: 'ring-red-500' },
+  high:     { label: 'بالا',    color: 'text-orange-500',  bg: 'bg-orange-500/10 border-orange-500/30', icon: Star,          ring: 'ring-orange-500' },
+  medium:   { label: 'متوسط',   color: 'text-yellow-500',  bg: 'bg-yellow-500/10 border-yellow-500/30', icon: Info,          ring: 'ring-yellow-500' },
+  low:      { label: 'پایین',   color: 'text-gray-400',    bg: 'bg-gray-500/10 border-gray-500/20',  icon: ChevronDown,   ring: 'ring-gray-400' },
+};
+
+const SOURCE_LABELS: Record<NoteSource, { label: string; color: string }> = {
+  manual:       { label: 'دستی',   color: 'bg-blue-500/10 text-blue-400' },
+  'ai-generated': { label: 'هوش مصنوعی', color: 'bg-purple-500/10 text-purple-400' },
+  'ai-assisted':  { label: 'AI کمکی',   color: 'bg-indigo-500/10 text-indigo-400' },
+  imported:     { label: 'وارد‌شده', color: 'bg-gray-500/10 text-gray-400' },
+};
+
+const STATUS_CONFIG: Record<NoteStatus, { label: string; color: string }> = {
+  new:           { label: 'جدید',        color: 'bg-blue-500/10 text-blue-400' },
+  'under-review': { label: 'در بررسی',   color: 'bg-yellow-500/10 text-yellow-400' },
+  confirmed:     { label: 'تأیید شده',   color: 'bg-green-500/10 text-green-400' },
+  active:        { label: 'فعال',        color: 'bg-emerald-500/10 text-emerald-400' },
+  weakening:     { label: 'در حال ضعیف شدن', color: 'bg-orange-500/10 text-orange-400' },
+  outdated:      { label: 'منسوخ',       color: 'bg-gray-500/10 text-gray-400' },
+  archived:      { label: 'آرشیو',       color: 'bg-gray-500/10 text-gray-500' },
+};
+
+// ── NoteCard ───────────────────────────────────────────────────────
+
+interface NoteCardProps {
+  note: KnowledgeNote;
+  category?: KnowledgeCategory;
+  onEdit: (note: KnowledgeNote) => void;
+  onDelete: (id: string) => void;
+  onMarkReviewed: (id: string) => void;
+  onSnooze: (id: string) => void;
+  onArchive: (id: string) => void;
+  onPin: (id: string, pinned: boolean) => void;
+  onFeedback: (note: KnowledgeNote) => void;
+  compact?: boolean;
+}
+
+function NoteCard({ note, category, onEdit, onDelete, onMarkReviewed, onSnooze, onArchive, onPin, onFeedback, compact }: NoteCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const imp = IMPORTANCE_CONFIG[note.importance] || IMPORTANCE_CONFIG.medium;
+  const ImpIcon = imp.icon;
+  const tags = (() => { try { return JSON.parse(note.tags) as string[]; } catch { return []; } })();
+
+  return (
+    <div
+      className={`rounded-lg border ${imp.bg} transition-all ${note.isPinned ? 'ring-1 ring-primary/40' : ''}`}
+      style={{ borderLeftColor: note.color, borderLeftWidth: 3 }}
+    >
+      <div className="p-3">
+        <div className="flex items-start gap-2">
+          <ImpIcon className={`h-4 w-4 mt-0.5 shrink-0 ${imp.color}`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start justify-between gap-1">
+              <h4 className="font-medium text-sm leading-snug">{note.title}</h4>
+              {note.isPinned && <Pin className="h-3 w-3 text-primary shrink-0 mt-0.5" />}
+            </div>
+
+            {/* Badges row */}
+            <div className="flex flex-wrap gap-1 mt-1">
+              <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${imp.color}`}>
+                {imp.label}
+              </Badge>
+              {category && (
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0" style={{ color: category.color, borderColor: `${category.color}40` }}>
+                  {category.icon} {category.name}
+                </Badge>
+              )}
+              <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${SOURCE_LABELS[note.source]?.color}`}>
+                {SOURCE_LABELS[note.source]?.label}
+              </Badge>
+              <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${STATUS_CONFIG[note.status]?.color}`}>
+                {STATUS_CONFIG[note.status]?.label}
+              </Badge>
+              {/* Knowledge quality indicator */}
+              {(() => {
+                const q = knowledgeService.getKnowledgeQuality(note);
+                const qColors: Record<string, string> = {
+                  strong: 'text-green-400 border-green-400/30',
+                  good: 'text-blue-400 border-blue-400/30',
+                  moderate: 'text-yellow-400 border-yellow-400/30',
+                  weak: 'text-gray-400 border-gray-400/30',
+                };
+                return (
+                  <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${qColors[q.level]}`} title={`کیفیت دانش: ${q.score}٪`}>
+                    {q.level === 'strong' ? '●●●' : q.level === 'good' ? '●●○' : q.level === 'moderate' ? '●○○' : '○○○'} {q.label}
+                  </Badge>
+                );
+              })()}
+            </div>
+
+            {/* Content preview */}
+            {!compact && (
+              <div className="mt-2">
+                <p className={`text-xs text-muted-foreground leading-relaxed ${!expanded ? 'line-clamp-2' : ''}`}>
+                  {note.content}
+                </p>
+                {note.content.length > 120 && (
+                  <button
+                    className="text-[10px] text-primary mt-0.5"
+                    onClick={() => setExpanded(!expanded)}
+                  >
+                    {expanded ? 'کمتر' : 'بیشتر'}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Evidence */}
+            {expanded && note.evidence && (
+              <EvidenceBlock evidenceJson={note.evidence} />
+            )}
+
+            {/* Tags */}
+            {tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {tags.map(t => (
+                  <span key={t} className="text-[10px] bg-muted/50 text-muted-foreground rounded px-1.5 py-0.5">#{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-border/40">
+          <div className="flex items-center gap-1">
+            <ActionBtn icon={CheckCircle2} label="مرور شد" onClick={() => onMarkReviewed(note.id)} className="text-green-500" />
+            <ActionBtn icon={Clock} label="تعویق" onClick={() => onSnooze(note.id)} />
+            <ActionBtn icon={Pin} label={note.isPinned ? 'برداشتن پین' : 'پین کردن'} onClick={() => onPin(note.id, !note.isPinned)} className={note.isPinned ? 'text-primary' : ''} />
+          </div>
+          <div className="flex items-center gap-1">
+            {note.source === 'ai-generated' && (
+              <ActionBtn icon={Zap} label="بازخورد" onClick={() => onFeedback(note)} className="text-purple-400" />
+            )}
+            <ActionBtn icon={Edit2} label="ویرایش" onClick={() => onEdit(note)} />
+            <ActionBtn icon={Archive} label="آرشیو" onClick={() => onArchive(note.id)} />
+            <ActionBtn icon={Trash2} label="حذف" onClick={() => onDelete(note.id)} className="text-destructive" />
+          </div>
+        </div>
+
+        {/* Review info */}
+        {note.reviewCount > 0 && (
+          <p className="text-[10px] text-muted-foreground mt-1">
+            مرور: {note.reviewCount} بار
+            {note.lastReviewedAt ? ` · آخرین: ${new Date(note.lastReviewedAt).toLocaleDateString('fa-IR')}` : ''}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ActionBtn({ icon: Icon, label, onClick, className = '' }: { icon: React.ElementType; label: string; onClick: () => void; className?: string }) {
+  return (
+    <button
+      title={label}
+      onClick={onClick}
+      className={`p-1 rounded hover:bg-muted/60 text-muted-foreground transition-colors ${className}`}
+    >
+      <Icon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function EvidenceBlock({ evidenceJson }: { evidenceJson: string }) {
+  const ev = (() => { try { return JSON.parse(evidenceJson); } catch { return null; } })();
+  if (!ev) return null;
+  return (
+    <div className="mt-2 p-2 rounded bg-muted/40 border border-border/40 text-[11px] space-y-0.5">
+      <p className="font-medium text-foreground/70">شواهد:</p>
+      <p>نمونه‌ها: {ev.sampleSize}</p>
+      {ev.avgResult !== null && <p>میانگین R: {typeof ev.avgResult === 'number' ? ev.avgResult.toFixed(2) : ev.avgResult}</p>}
+      <p>اطمینان: <span className={ev.confidence === 'high' ? 'text-green-400' : ev.confidence === 'moderate' ? 'text-yellow-400' : 'text-gray-400'}>{ev.confidence === 'high' ? 'بالا' : ev.confidence === 'moderate' ? 'متوسط' : 'پایین'}</span></p>
+      {ev.description && <p className="text-muted-foreground">{ev.description}</p>}
+    </div>
+  );
+}
+
+// ── Note Form Dialog ────────────────────────────────────────────────
+
+interface NoteFormProps {
+  open: boolean;
+  onClose: () => void;
+  onSave: (data: Partial<KnowledgeNote>) => void;
+  initial?: Partial<KnowledgeNote>;
+  categories: KnowledgeCategory[];
+}
+
+function NoteFormDialog({ open, onClose, onSave, initial, categories }: NoteFormProps) {
+  const createInitialForm = (note?: Partial<KnowledgeNote>): Partial<KnowledgeNote> => ({
+    title: '', content: '', category: 'trading-rules', importance: 'medium',
+    color: '#6b7280', source: 'manual', status: 'active', isActive: true,
+    isPinned: false, isRule: false, reviewFrequency: 'as-needed',
+    requireConfirmation: false, tags: '[]', relatedSymbols: '[]',
+    relatedSessions: '[]', relatedDays: '[]', relatedStrategies: '[]',
+    relatedSetups: '[]', relatedTimeframes: '[]', relatedMarketRegimes: '[]',
+    ...note,
+  });
+
+  const parseList = <T,>(value: string | null | undefined, fallback: T[]): T[] => {
+    try {
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed as T[] : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const initialForm = createInitialForm(initial);
+  const [form, setForm] = useState<Partial<KnowledgeNote>>(initialForm);
+  const [tagsInput, setTagsInput] = useState(() => parseList<string>(initial?.tags, []).join(', '));
+  const [symbolsInput, setSymbolsInput] = useState(() => parseList<string>(initial?.relatedSymbols, []).join(', '));
+  const [sessionsInput, setSessionsInput] = useState<string[]>(() => parseList<string>(initial?.relatedSessions, []));
+  const [daysInput, setDaysInput] = useState<number[]>(() => parseList<number>(initial?.relatedDays, []));
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [similar, setSimilar] = useState<KnowledgeNote[]>([]);
+
+  // The dialog stays mounted while the parent switches between notes. Reset all
+  // local fields when it opens or when its edit target changes; otherwise the
+  // first note's form values leak into every subsequent edit/new-note action.
+  useEffect(() => {
+    if (!open) return;
+    const next = createInitialForm(initial);
+    setForm(next);
+    setTagsInput(parseList<string>(initial?.tags, []).join(', '));
+    setSymbolsInput(parseList<string>(initial?.relatedSymbols, []).join(', '));
+    setSessionsInput(parseList<string>(initial?.relatedSessions, []));
+    setDaysInput(parseList<number>(initial?.relatedDays, []));
+    setShowAdvanced(false);
+    setSimilar([]);
+  }, [open, initial?.id]);
+
+  // Importance → auto color
+  useEffect(() => {
+    const colorMap: Record<string, string> = {
+      critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#6b7280',
+    };
+    setForm(f => ({ ...f, color: colorMap[f.importance as string] ?? '#6b7280' }));
+  }, [form.importance]);
+
+  // Duplicate check
+  useEffect(() => {
+    const timeout = setTimeout(async () => {
+      if ((form.title?.length ?? 0) > 5 || (form.content?.length ?? 0) > 10) {
+        const found = await knowledgeService.findSimilarNotes(form.title ?? '', form.content ?? '', initial?.id);
+        setSimilar(found.slice(0, 2));
+      } else {
+        setSimilar([]);
+      }
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [form.title, form.content, initial?.id]);
+
+  const handleSave = () => {
+    if (!form.title?.trim()) return;
+    const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean);
+    const symbols = symbolsInput.split(',').map(s => s.trim()).filter(Boolean);
+    onSave({
+      ...form,
+      tags: JSON.stringify(tags),
+      relatedSymbols: JSON.stringify(symbols),
+      relatedSessions: JSON.stringify(sessionsInput),
+      relatedDays: JSON.stringify(daysInput),
+    });
+    onClose();
+  };
+
+  const sessionOptions = [
+    { value: 'london', label: 'لندن' },
+    { value: 'newyork', label: 'نیویورک' },
+    { value: 'asian', label: 'آسیا' },
+    { value: 'custom', label: 'سفارشی' },
+  ];
+
+  return (
+    <Dialog open={open} onOpenChange={onClose}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" dir="rtl">
+        <DialogHeader>
+          <DialogTitle>{initial?.id ? 'ویرایش یادداشت' : 'یادداشت جدید'}</DialogTitle>
+        </DialogHeader>
+
+        {similar.length > 0 && (
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-xs space-y-2">
+            <p className="font-medium text-yellow-400">⚠️ یادداشت مشابه یافت شد — ادغام می‌کنید؟</p>
+            {similar.map(s => (
+              <div key={s.id} className="flex items-center justify-between gap-2">
+                <p className="text-muted-foreground truncate">• {s.title}</p>
+                {initial?.id && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (confirm(`"${initial.title}" را در "${s.title}" ادغام کنید؟`)) {
+                        await knowledgeService.mergeNotes(s.id, initial.id!);
+                        onClose();
+                      }
+                    }}
+                    className="shrink-0 text-[10px] bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded px-2 py-0.5 transition-colors"
+                  >
+                    ادغام
+                  </button>
+                )}
+              </div>
+            ))}
+            <p className="text-muted-foreground/60">یا یادداشت جدید را جداگانه ذخیره کنید</p>
+          </div>
+        )}
+
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">عنوان *</label>
+            <Input
+              value={form.title ?? ''}
+              onChange={e => setForm(f => ({ ...f, title: e.target.value }))}
+              placeholder="عنوان یادداشت..."
+              className="mt-1"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">محتوا</label>
+            <Textarea
+              value={form.content ?? ''}
+              onChange={e => setForm(f => ({ ...f, content: e.target.value }))}
+              placeholder="توضیحات کامل..."
+              rows={4}
+              className="mt-1"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs font-medium text-muted-foreground">دسته‌بندی</label>
+              <Select value={form.category} onValueChange={v => setForm(f => ({ ...f, category: v }))}>
+                <SelectTrigger className="mt-1 h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {categories.map(c => (
+                    <SelectItem key={c.id} value={c.id}>{c.icon} {c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-muted-foreground">اهمیت</label>
+              <Select value={form.importance} onValueChange={v => setForm(f => ({ ...f, importance: v as NoteImportance }))}>
+                <SelectTrigger className="mt-1 h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="critical">🔴 حیاتی</SelectItem>
+                  <SelectItem value="high">🟠 بالا</SelectItem>
+                  <SelectItem value="medium">🟡 متوسط</SelectItem>
+                  <SelectItem value="low">⚪ پایین</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={form.isRule ?? false} onChange={e => setForm(f => ({ ...f, isRule: e.target.checked }))} className="rounded" />
+              <span className="text-xs">قانون شخصی</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={form.isPinned ?? false} onChange={e => setForm(f => ({ ...f, isPinned: e.target.checked }))} className="rounded" />
+              <span className="text-xs">پین شده</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={form.requireConfirmation ?? false} onChange={e => setForm(f => ({ ...f, requireConfirmation: e.target.checked }))} className="rounded" />
+              <span className="text-xs">نیاز به تأیید</span>
+            </label>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">تگ‌ها (با کاما جدا کنید)</label>
+            <Input value={tagsInput} onChange={e => setTagsInput(e.target.value)} placeholder="مثال: ورود, تأیید, FOMO" className="mt-1" />
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">نمادهای مرتبط</label>
+            <Input value={symbolsInput} onChange={e => setSymbolsInput(e.target.value)} placeholder="مثال: XAUUSD, EURUSD" className="mt-1" />
+          </div>
+
+          {/* Sessions */}
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">سشن‌های مرتبط</label>
+            <div className="flex flex-wrap gap-2 mt-1">
+              {sessionOptions.map(s => (
+                <label key={s.value} className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sessionsInput.includes(s.value)}
+                    onChange={e => setSessionsInput(prev => e.target.checked ? [...prev, s.value] : prev.filter(x => x !== s.value))}
+                    className="rounded"
+                  />
+                  <span className="text-xs">{s.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Days of week */}
+          <div>
+            <label className="text-xs font-medium text-muted-foreground">روزهای مرتبط</label>
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {[
+                { d: 0, label: 'یک' }, { d: 1, label: 'دو' }, { d: 2, label: 'سه' },
+                { d: 3, label: 'چهار' }, { d: 4, label: 'پنج' }, { d: 5, label: 'جمعه' }, { d: 6, label: 'شنبه' },
+              ].map(({ d, label }) => (
+                <label key={d} className="flex items-center gap-1 cursor-pointer bg-muted/30 hover:bg-muted/50 rounded px-2 py-1 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={daysInput.includes(d)}
+                    onChange={e => setDaysInput(prev => e.target.checked ? [...prev, d] : prev.filter(x => x !== d))}
+                    className="rounded w-3 h-3"
+                  />
+                  <span className="text-xs">{label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Advanced */}
+          <button
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground w-full"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+          >
+            {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            تنظیمات پیشرفته
+          </button>
+          {showAdvanced && (
+            <div className="space-y-2 pl-2 border-l border-border">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-muted-foreground">وضعیت</label>
+                  <Select value={form.status} onValueChange={v => setForm(f => ({ ...f, status: v as NoteStatus }))}>
+                    <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {(Object.keys(STATUS_CONFIG) as NoteStatus[]).map(s => (
+                        <SelectItem key={s} value={s}>{STATUS_CONFIG[s].label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground">تکرار مرور</label>
+                  <Select value={form.reviewFrequency} onValueChange={v => setForm(f => ({ ...f, reviewFrequency: v as KnowledgeNote['reviewFrequency'] }))}>
+                    <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="daily">روزانه</SelectItem>
+                      <SelectItem value="weekly">هفتگی</SelectItem>
+                      <SelectItem value="monthly">ماهانه</SelectItem>
+                      <SelectItem value="as-needed">در صورت نیاز</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">رنگ سفارشی</label>
+                <div className="flex items-center gap-2 mt-1">
+                  <input type="color" value={form.color} onChange={e => setForm(f => ({ ...f, color: e.target.value }))} className="h-8 w-16 rounded cursor-pointer" />
+                  <span className="text-xs text-muted-foreground">{form.color}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>انصراف</Button>
+          <Button onClick={handleSave} disabled={!form.title?.trim()}>ذخیره</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Feedback Dialog ────────────────────────────────────────────────
+
+function FeedbackDialog({ note, onClose, onSubmit }: { note: KnowledgeNote | null; onClose: () => void; onSubmit: (id: string, rating: string, text: string) => void }) {
+  const [rating, setRating] = useState('');
+  const [text, setText] = useState('');
+
+  if (!note) return null;
+
+  const ratings = [
+    { value: 'correct',      label: '✅ درست است',         className: 'border-green-500/40 text-green-400' },
+    { value: 'incorrect',    label: '❌ نادرست است',        className: 'border-red-500/40 text-red-400' },
+    { value: 'partial',      label: '⚡ تا حدی درست',      className: 'border-yellow-500/40 text-yellow-400' },
+    { value: 'not-relevant', label: '🔕 مرتبط نیست',       className: 'border-gray-500/40 text-gray-400' },
+    { value: 'important',    label: '⭐ خیلی مهم',          className: 'border-primary/40 text-primary' },
+    { value: 'not-important',label: '📌 اهمیتی ندارد',     className: 'border-gray-500/40 text-muted-foreground' },
+  ];
+
+  return (
+    <Dialog open={!!note} onOpenChange={onClose}>
+      <DialogContent dir="rtl">
+        <DialogHeader><DialogTitle>بازخورد به بینش AI</DialogTitle></DialogHeader>
+        <p className="text-sm font-medium">{note.title}</p>
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          {ratings.map(r => (
+            <button
+              key={r.value}
+              onClick={() => setRating(r.value)}
+              className={`p-2 rounded-lg border text-xs transition-colors ${r.className} ${rating === r.value ? 'bg-muted/60 ring-1 ring-primary' : 'bg-background hover:bg-muted/30'}`}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <Textarea value={text} onChange={e => setText(e.target.value)} placeholder="توضیح اضافی (اختیاری)..." rows={2} className="mt-2" />
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>انصراف</Button>
+          <Button onClick={() => { if (rating) onSubmit(note.id, rating, text); onClose(); }} disabled={!rating}>ثبت بازخورد</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Briefing Tab ───────────────────────────────────────────────────
+
+function BriefingTab({ categories }: { categories: KnowledgeCategory[] }) {
+  const [ctx, setCtx] = useState<BriefingContext>({ mode: 'standard', symbol: '', session: '' });
+  const [briefing, setBriefing] = useState<BriefingSection[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [generated, setGenerated] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [confirmedCritical, setConfirmedCritical] = useState(false);
+  const { toast } = useToast();
+
+  const catMap = useMemo(() => {
+    const m: Record<string, KnowledgeCategory> = {};
+    categories.forEach(c => { m[c.id] = c; });
+    return m;
+  }, [categories]);
+
+  // Check if any critical note requires confirmation
+  const hasConfirmationRequired = useMemo(
+    () => briefing.some(s => s.key === 'critical' && s.notes.some(n => n.requireConfirmation)),
+    [briefing]
+  );
+
+  const generate = useCallback(async () => {
+    setLoading(true);
+    try {
+      const sections = await knowledgeService.generateDailyBriefing({
+        ...ctx,
+        symbol: ctx.symbol?.trim() || undefined,
+        session: ctx.session || undefined,
+      });
+      setBriefing(sections);
+      setGenerated(true);
+      setExpandedSections(new Set(['critical', 'mistakes']));
+    } finally {
+      setLoading(false);
+    }
+  }, [ctx]);
+
+  const handleMarkReviewed = async (id: string) => {
+    await knowledgeService.markReviewed(id);
+    toast({ title: 'مرور شد ✓' });
+  };
+
+  const sectionIcons: Record<string, React.ElementType> = {
+    critical: AlertTriangle, mistakes: XCircle, session: Clock,
+    symbol: Target, strengths: Award, ai: Sparkles, day: Calendar, general: BookOpen,
+  };
+
+  return (
+    <div className="space-y-4" dir="rtl">
+      {/* Context setup */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2"><Calendar className="h-4 w-4 text-primary" />تنظیم زمینه امروز</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-muted-foreground">نماد</label>
+              <Input value={ctx.symbol ?? ''} onChange={e => setCtx(c => ({ ...c, symbol: e.target.value }))} placeholder="مثال: XAUUSD" className="mt-1 h-8 text-sm" />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">سشن</label>
+              <Select value={ctx.session ?? ''} onValueChange={v => setCtx(c => ({ ...c, session: v || '' }))}>
+                <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue placeholder="انتخاب سشن" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">همه</SelectItem>
+                  <SelectItem value="london">لندن</SelectItem>
+                  <SelectItem value="newyork">نیویورک</SelectItem>
+                  <SelectItem value="asian">آسیا</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">استراتژی / ستاپ</label>
+              <Input value={ctx.strategyId ?? ''} onChange={e => setCtx(c => ({ ...c, strategyId: e.target.value || undefined }))} placeholder="نام استراتژی..." className="mt-1 h-8 text-sm" />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground">حجم برفینگ</label>
+              <Select value={ctx.mode} onValueChange={v => setCtx(c => ({ ...c, mode: v as BriefingContext['mode'] }))}>
+                <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="quick">⚡ سریع (۳-۵)</SelectItem>
+                  <SelectItem value="standard">📋 استاندارد (۵-۱۰)</SelectItem>
+                  <SelectItem value="deep">📚 کامل (همه)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <Button onClick={generate} disabled={loading} className="w-full gap-2">
+            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Brain className="h-4 w-4" />}
+            {loading ? 'در حال تولید...' : 'تولید برفینگ امروز'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Critical confirmation */}
+      {generated && hasConfirmationRequired && !confirmedCritical && (
+        <Card className="border-red-500/30 bg-red-500/5">
+          <CardContent className="pt-4 pb-3">
+            <p className="text-sm font-medium text-red-400 mb-3">⚠️ قبل از معامله، قوانین حیاتی را تأیید کنید</p>
+            <Button variant="outline" className="w-full border-red-500/40 text-red-400 hover:bg-red-500/10" onClick={() => setConfirmedCritical(true)}>
+              <CheckCircle2 className="h-4 w-4 mr-2" /> بله، قوانین حیاتی را مرور کردم
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Briefing sections */}
+      {generated && (
+        briefing.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <Brain className="h-10 w-10 mx-auto mb-3 opacity-30" />
+            <p>هنوز یادداشتی ندارید</p>
+            <p className="text-sm mt-1">از تب «یادداشت‌ها» یادداشت اضافه کنید</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-muted-foreground">
+                {briefing.reduce((sum, s) => sum + s.notes.length, 0)} یادداشت در {briefing.length} بخش
+              </p>
+              <button
+                className="text-xs text-primary"
+                onClick={() => {
+                  const allKeys = new Set(briefing.map(s => s.key));
+                  setExpandedSections(prev => prev.size === allKeys.size ? new Set() : allKeys);
+                }}
+              >
+                {expandedSections.size > 0 ? 'جمع کردن همه' : 'باز کردن همه'}
+              </button>
+            </div>
+            {briefing.map(section => {
+              const SIcon = sectionIcons[section.key] || BookOpen;
+              const isOpen = expandedSections.has(section.key);
+              return (
+                <div key={section.key} className="rounded-lg border border-border/60 overflow-hidden">
+                  <button
+                    className="w-full flex items-center justify-between p-3 hover:bg-muted/30 transition-colors"
+                    onClick={() => setExpandedSections(prev => {
+                      const n = new Set(prev);
+                      isOpen ? n.delete(section.key) : n.add(section.key);
+                      return n;
+                    })}
+                  >
+                    <div className="flex items-center gap-2">
+                      <SIcon className="h-4 w-4 text-primary" />
+                      <span className="text-sm font-medium">{section.label}</span>
+                      <span className="text-xs text-muted-foreground bg-muted/60 rounded-full px-1.5">{section.notes.length}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground hidden sm:block">{section.reason}</span>
+                      {isOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="p-3 pt-0 space-y-2 border-t border-border/40">
+                      {section.notes.map(n => (
+                        <div key={n.id} className={`rounded-md border p-3 ${IMPORTANCE_CONFIG[n.importance]?.bg}`} style={{ borderLeftColor: n.color, borderLeftWidth: 3 }}>
+                          <div className="flex items-start gap-2">
+                            <div className="flex-1">
+                              <p className="text-sm font-medium">{n.title}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{n.content}</p>
+                            </div>
+                            <button
+                              onClick={() => handleMarkReviewed(n.id)}
+                              className="p-1 rounded hover:bg-green-500/10 text-muted-foreground hover:text-green-400 transition-colors shrink-0"
+                              title="مرور شد"
+                            >
+                              <CheckCircle2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+// ── Notes Tab ──────────────────────────────────────────────────────
+
+function NotesTab({
+  notes, categories, onEdit, onDelete, onMarkReviewed, onSnooze, onArchive, onPin, onFeedback,
+}: {
+  notes: KnowledgeNote[];
+  categories: KnowledgeCategory[];
+  onEdit: (n: KnowledgeNote) => void;
+  onDelete: (id: string) => void;
+  onMarkReviewed: (id: string) => void;
+  onSnooze: (id: string) => void;
+  onArchive: (id: string) => void;
+  onPin: (id: string, p: boolean) => void;
+  onFeedback: (n: KnowledgeNote) => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [catFilter, setCatFilter] = useState('all');
+  const [impFilter, setImpFilter] = useState('all');
+  const [srcFilter, setSrcFilter] = useState('all');
+  const [showArchived, setShowArchived] = useState(false);
+
+  const catMap = useMemo(() => {
+    const m: Record<string, KnowledgeCategory> = {};
+    categories.forEach(c => { m[c.id] = c; });
+    return m;
+  }, [categories]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return notes.filter(n => {
+      if (!showArchived && n.status === 'archived') return false;
+      if (catFilter !== 'all' && n.category !== catFilter) return false;
+      if (impFilter !== 'all' && n.importance !== impFilter) return false;
+      if (srcFilter !== 'all' && n.source !== srcFilter) return false;
+      if (q) {
+        const tags = (() => { try { return JSON.parse(n.tags) as string[]; } catch { return []; } })();
+        return n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q) || tags.some(t => t.toLowerCase().includes(q));
+      }
+      return true;
+    });
+  }, [notes, search, catFilter, impFilter, srcFilter, showArchived]);
+
+  return (
+    <div className="space-y-3" dir="rtl">
+      {/* Filters */}
+      <div className="space-y-2">
+        <div className="relative">
+          <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="جستجو در یادداشت‌ها..." className="pr-9" />
+        </div>
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          <Select value={catFilter} onValueChange={setCatFilter}>
+            <SelectTrigger className="h-7 text-xs w-36 shrink-0"><SelectValue placeholder="دسته" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">همه دسته‌ها</SelectItem>
+              {categories.map(c => <SelectItem key={c.id} value={c.id}>{c.icon} {c.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Select value={impFilter} onValueChange={setImpFilter}>
+            <SelectTrigger className="h-7 text-xs w-28 shrink-0"><SelectValue placeholder="اهمیت" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">همه</SelectItem>
+              <SelectItem value="critical">🔴 حیاتی</SelectItem>
+              <SelectItem value="high">🟠 بالا</SelectItem>
+              <SelectItem value="medium">🟡 متوسط</SelectItem>
+              <SelectItem value="low">⚪ پایین</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={srcFilter} onValueChange={setSrcFilter}>
+            <SelectTrigger className="h-7 text-xs w-28 shrink-0"><SelectValue placeholder="منبع" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">همه منابع</SelectItem>
+              <SelectItem value="manual">دستی</SelectItem>
+              <SelectItem value="ai-generated">هوش مصنوعی</SelectItem>
+            </SelectContent>
+          </Select>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground whitespace-nowrap cursor-pointer shrink-0">
+            <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+            آرشیو
+          </label>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted-foreground">{filtered.length} یادداشت</p>
+
+      {filtered.length === 0 ? (
+        <div className="text-center py-12 text-muted-foreground">
+          <BookOpen className="h-10 w-10 mx-auto mb-3 opacity-30" />
+          <p>یادداشتی پیدا نشد</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map(n => (
+            <NoteCard
+              key={n.id}
+              note={n}
+              category={catMap[n.category]}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onMarkReviewed={onMarkReviewed}
+              onSnooze={onSnooze}
+              onArchive={onArchive}
+              onPin={onPin}
+              onFeedback={onFeedback}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Rules Tab ──────────────────────────────────────────────────────
+
+function RulesTab({
+  notes, categories, onEdit, onDelete, onToggleActive, onMarkReviewed, onFeedback,
+}: {
+  notes: KnowledgeNote[];
+  categories: KnowledgeCategory[];
+  onEdit: (n: KnowledgeNote) => void;
+  onDelete: (id: string) => void;
+  onToggleActive: (id: string, active: boolean) => void;
+  onMarkReviewed: (id: string) => void;
+  onFeedback: (n: KnowledgeNote) => void;
+}) {
+  const rules = useMemo(() => notes.filter(n => n.isRule && n.status !== 'archived'), [notes]);
+  const catMap = useMemo(() => {
+    const m: Record<string, KnowledgeCategory> = {};
+    categories.forEach(c => { m[c.id] = c; });
+    return m;
+  }, [categories]);
+
+  const critical = rules.filter(n => n.importance === 'critical');
+  const high = rules.filter(n => n.importance === 'high');
+  const rest = rules.filter(n => n.importance !== 'critical' && n.importance !== 'high');
+
+  const RuleItem = ({ n }: { n: KnowledgeNote }) => (
+    <div className={`flex items-center gap-3 rounded-lg border p-3 transition-all ${n.isActive ? IMPORTANCE_CONFIG[n.importance]?.bg : 'bg-muted/20 opacity-60'}`} style={{ borderLeftColor: n.color, borderLeftWidth: 3 }}>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium truncate">{n.title}</p>
+        <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">{n.content}</p>
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          onClick={() => onToggleActive(n.id, !n.isActive)}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${n.isActive ? 'bg-primary' : 'bg-muted'}`}
+        >
+          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${n.isActive ? 'translate-x-1' : 'translate-x-[18px]'}`} />
+        </button>
+        <ActionBtn icon={Edit2} label="ویرایش" onClick={() => onEdit(n)} />
+        <ActionBtn icon={Trash2} label="حذف" onClick={() => onDelete(n.id)} className="text-destructive" />
+      </div>
+    </div>
+  );
+
+  if (rules.length === 0) {
+    return (
+      <div className="text-center py-12 text-muted-foreground" dir="rtl">
+        <Shield className="h-10 w-10 mx-auto mb-3 opacity-30" />
+        <p>هنوز قانون شخصی ندارید</p>
+        <p className="text-sm mt-1">هنگام ایجاد یادداشت، گزینه «قانون شخصی» را فعال کنید</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4" dir="rtl">
+      {critical.length > 0 && (
+        <div>
+          <h3 className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-2 flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5" /> قوانین حیاتی</h3>
+          <div className="space-y-2">{critical.map(n => <RuleItem key={n.id} n={n} />)}</div>
+        </div>
+      )}
+      {high.length > 0 && (
+        <div>
+          <h3 className="text-xs font-semibold text-orange-400 uppercase tracking-wider mb-2 flex items-center gap-1"><Star className="h-3.5 w-3.5" /> قوانین مهم</h3>
+          <div className="space-y-2">{high.map(n => <RuleItem key={n.id} n={n} />)}</div>
         </div>
       )}
       {rest.length > 0 && (
