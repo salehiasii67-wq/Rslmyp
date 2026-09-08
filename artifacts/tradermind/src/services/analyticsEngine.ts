@@ -23,7 +23,7 @@ import {
   BaseMetrics,
 } from './performanceService';
 import { computeAnalytics, filterTradesByRange, TimeRangeKey, AnalyticsData } from './analyticsService';
-import { isWin, isLoss, isClosed } from '../lib/tradeHelpers';
+import { isWin, isLoss, isClosed, netPnl } from '../lib/tradeHelpers';
 import { computeTraderProfile } from './traderProfileService';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ export function computeCoreMetrics(trades: Trade[], overtradingThreshold = 4): C
  */
 export async function computeFullAnalytics(
   input: EngineInput,
-  timeRange: TimeRangeKey = 'all' as TimeRangeKey,
+  _timeRange: TimeRangeKey = 'custom',
 ): Promise<FullAnalyticsResult> {
   const { trades, journals, strategies } = input;
   const closedTrades = trades.filter(isClosed);
@@ -215,6 +215,6 @@ export function getQuickSummary(trades: Trade[]) {
   const withPnL = closed.filter(t => t.profitLoss !== null);
   const winRate = closed.length > 0 ? wins.length / closed.length : null;
   const avgR = withR.length > 0 ? withR.reduce((s, t) => s + t.rMultiple!, 0) / withR.length : null;
-  const totalPnL = withPnL.length > 0 ? withPnL.reduce((s, t) => s + t.profitLoss!, 0) : null;
+  const totalPnL = withPnL.length > 0 ? withPnL.reduce((s, t) => s + netPnl(t), 0) : null;
   return { total: closed.length, wins: wins.length, winRate, avgR, totalPnL };
 }
