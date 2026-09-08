@@ -1,1010 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Skeleton } from '../components/ui/skeleton';
-import {
-  datasetService, sessionService, decisionService, playlistService,
-  parseCSVCandles, getPersonalizedSuggestions, generateLessonSuggestion,
-  getReplayAnalytics, exportReplayData, getAlternativeAnalysis,
-  getSimilarDatasets,
-} from '../services/replayService';
-import {
-  ReplayDataset, ReplaySession, ReplayDecision, ReplayPlaylist,
-  ReplayCandle, ReplayScreenshotItem, ReplayMode, CoachingMode,
-  ReplayDecisionAction, Trade,
-} from '../db/database';
-import { knowledgeService } from '../services/knowledgeService';
-import { db } from '../db/database';
-import { Button } from '../components/ui/button';
-import { Badge } from '../components/ui/badge';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
-import { Input } from '../components/ui/input';
-import { Textarea } from '../components/ui/textarea';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { useToast } from '../hooks/use-toast';
-import {
-  Play, Pause, SkipForward, Eye, EyeOff, ChevronRight, ChevronLeft,
-  Plus, Upload, Trash2, BarChart3, TrendingUp, TrendingDown,
-  AlertCircle, CheckCircle2, Clock, Target, RefreshCw, Brain,
-  Star, Zap, BookOpen, ListOrdered, Activity, Award,
-  Download, FileText, Image, Info, X, ChevronDown, ChevronUp,
-  Layers, Flag, RotateCcw, Minus, Search, SlidersHorizontal,
-  GitBranch, Shuffle, ArrowRightLeft,
-} from 'lucide-react';
-
-// ── SVG Candlestick Chart ──────────────────────────────────────────
-
-interface CandleChartProps {
-  candles: ReplayCandle[];
-  height?: number;
-  simulatedEntry?: number | null;
-  simulatedSL?: number | null;
-  simulatedTP?: number | null;
-}
-
-function CandleChart({ candles, height = 220, simulatedEntry, simulatedSL, simulatedTP }: CandleChartProps) {
-  if (candles.length === 0) return (
-    <div className="flex items-center justify-center h-40 text-muted-foreground text-sm">
-      <BarChart3 className="h-8 w-8 opacity-30 mr-2" />داده کندلی موجود نیست
-    </div>
-  );
-
-  const W = 600;
-  const H = height;
-  const padL = 10, padR = 45, padT = 12, padB = 22;
-  const chartW = W - padL - padR;
-  const chartH = H - padT - padB;
-
-  const prices = candles.flatMap(c => [c.high, c.low]);
-  let minP = Math.min(...prices);
-  let maxP = Math.max(...prices);
-  // Add lines to range if needed
-  [simulatedEntry, simulatedSL, simulatedTP].filter(Boolean).forEach(p => {
-    if (p! < minP) minP = p!;
-    if (p! > maxP) maxP = p!;
-  });
-  const range = maxP - minP || 1;
-  const pad5 = range * 0.05;
-  minP -= pad5; maxP += pad5;
-
-  const toX = (i: number) => padL + (i + 0.5) * (chartW / candles.length);
-  const toY = (p: number) => padT + ((maxP - p) / (maxP - minP)) * chartH;
-  const candleW = Math.max(2, Math.min(14, (chartW / candles.length) * 0.7));
-
-  // Price ticks
-  const nTicks = 4;
-  const ticks = Array.from({ length: nTicks + 1 }, (_, i) => minP + (i / nTicks) * (maxP - minP));
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height }}>
-      {/* Grid */}
-      {ticks.map((t, i) => (
-        <g key={i}>
-          <line x1={padL} x2={W - padR} y1={toY(t)} y2={toY(t)} stroke="rgba(255,255,255,0.06)" />
-          <text x={W - padR + 3} y={toY(t) + 4} fontSize={9} fill="#6b7280">{t.toFixed(t > 100 ? 0 : 4)}</text>
-        </g>
-      ))}
-
-      {/* Simulated lines */}
-      {simulatedEntry && (
-        <line x1={padL} x2={W - padR} y1={toY(simulatedEntry)} y2={toY(simulatedEntry)}
-          stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="4,3" />
-      )}
-      {simulatedSL && (
-        <line x1={padL} x2={W - padR} y1={toY(simulatedSL)} y2={toY(simulatedSL)}
-          stroke="#ef4444" strokeWidth={1.5} strokeDasharray="4,3" />
-      )}
-      {simulatedTP && (
-        <line x1={padL} x2={W - padR} y1={toY(simulatedTP)} y2={toY(simulatedTP)}
-          stroke="#22c55e" strokeWidth={1.5} strokeDasharray="4,3" />
-      )}
-
-      {/* Candles */}
-      {candles.map((c, i) => {
-        const x = toX(i);
-        const isUp = c.close >= c.open;
-        const color = isUp ? '#22c55e' : '#ef4444';
-        const bodyTop = toY(Math.max(c.open, c.close));
-        const bodyBot = toY(Math.min(c.open, c.close));
-        const bodyH   = Math.max(1, bodyBot - bodyTop);
-        return (
-          <g key={i}>
-            <line x1={x} x2={x} y1={toY(c.high)} y2={toY(c.low)} stroke={color} strokeWidth={1} />
-            <rect x={x - candleW / 2} y={bodyTop} width={candleW} height={bodyH} fill={color} rx={0.5} />
-          </g>
-        );
-      })}
-
-      {/* Time axis */}
-      {candles.length <= 30
-        ? candles.map((c, i) => i % Math.ceil(candles.length / 6) === 0 && (
-          <text key={i} x={toX(i)} y={H - 4} fontSize={8} fill="#6b7280" textAnchor="middle">
-            {new Date(c.timestamp).toLocaleString('fa-IR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-          </text>
-        ))
-        : null
-      }
-
-      {/* Labels */}
-      {simulatedEntry && <text x={W - padR + 3} y={toY(simulatedEntry) - 3} fontSize={8} fill="#3b82f6">ورود</text>}
-      {simulatedSL    && <text x={W - padR + 3} y={toY(simulatedSL) - 3}    fontSize={8} fill="#ef4444">SL</text>}
-      {simulatedTP    && <text x={W - padR + 3} y={toY(simulatedTP) - 3}    fontSize={8} fill="#22c55e">TP</text>}
-    </svg>
-  );
-}
-
-// ── Screenshot Viewer ──────────────────────────────────────────────
-
-function ScreenshotViewer({ item, step, total }: { item: ReplayScreenshotItem; step: number; total: number }) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <Image className="h-3.5 w-3.5" />
-          {item.label || `مرحله ${step + 1}`}
-        </span>
-        <span>{step + 1} / {total}</span>
-      </div>
-      <div className="rounded-lg overflow-hidden border border-border/40 bg-black/20">
-        <img
-          src={item.dataUrl}
-          alt={item.label || `Step ${step + 1}`}
-          className="w-full object-contain max-h-72"
-        />
-      </div>
-      {item.timeframe && (
-        <Badge variant="outline" className="text-xs">{item.timeframe}</Badge>
-      )}
-      {item.notes && (
-        <p className="text-xs text-muted-foreground bg-muted/30 rounded p-2">{item.notes}</p>
-      )}
-    </div>
-  );
-}
-
-// ── Decision Panel ─────────────────────────────────────────────────
-
-interface DecisionPanelProps {
-  onSubmit: (d: {
-    action: ReplayDecisionAction;
-    entryPrice?: number;
-    stopLoss?: number;
-    takeProfit?: number;
-    riskPercent?: number;
-    whatISee?: string;
-    whyEnter?: string;
-    invalidation?: string;
-    marketCondition?: string;
-    confidence?: number;
-  }) => void;
-  hasOpenPosition: boolean;
-  coachingMode: CoachingMode;
-  lastCandle?: ReplayCandle;
-}
-
-function DecisionPanel({ onSubmit, hasOpenPosition, coachingMode, lastCandle }: DecisionPanelProps) {
-  const [action, setAction] = useState<ReplayDecisionAction | ''>('');
-  const [entry, setEntry] = useState(lastCandle ? String(lastCandle.close) : '');
-  const [sl, setSl] = useState('');
-  const [tp, setTp] = useState('');
-  const [risk, setRisk] = useState('1');
-  const [whatISee, setWhatISee] = useState('');
-  const [whyEnter, setWhyEnter] = useState('');
-  const [invalidation, setInvalidation] = useState('');
-  const [marketCond, setMarketCond] = useState('');
-  const [confidence, setConfidence] = useState(5);
-  const [showReasoning, setShowReasoning] = useState(coachingMode === 'reflection' || coachingMode === 'coaching');
-  const startTimeRef = useRef(Date.now());
-
-  useEffect(() => { startTimeRef.current = Date.now(); }, []);
-
-  const isTrade = action === 'long' || action === 'short';
-  const isManage = hasOpenPosition && (action === 'close' || action === 'move-sl' || action === 'move-tp' || action === 'partial-close');
-
-  const handleSubmit = () => {
-    if (!action) return;
-    onSubmit({
-      action: action as ReplayDecisionAction,
-      entryPrice: isTrade ? parseFloat(entry) || undefined : undefined,
-      stopLoss: (isTrade || action === 'move-sl') ? parseFloat(sl) || undefined : undefined,
-      takeProfit: (isTrade || action === 'move-tp') ? parseFloat(tp) || undefined : undefined,
-      riskPercent: isTrade ? parseFloat(risk) || undefined : undefined,
-      whatISee: whatISee || undefined,
-      whyEnter: whyEnter || undefined,
-      invalidation: invalidation || undefined,
-      marketCondition: marketCond || undefined,
-      confidence,
-    });
-  };
-
-  const actionButtons = hasOpenPosition
-    ? [
-        { v: 'wait' as ReplayDecisionAction, label: 'نگه دار', icon: Pause, cls: 'border-blue-500/40 text-blue-400' },
-        { v: 'close' as ReplayDecisionAction, label: 'بستن', icon: X, cls: 'border-red-500/40 text-red-400' },
-        { v: 'partial-close' as ReplayDecisionAction, label: 'بستن جزئی', icon: Minus, cls: 'border-orange-500/40 text-orange-400' },
-        { v: 'move-sl' as ReplayDecisionAction, label: 'تغییر SL', icon: Flag, cls: 'border-yellow-500/40 text-yellow-400' },
-        { v: 'move-tp' as ReplayDecisionAction, label: 'تغییر TP', icon: Target, cls: 'border-green-500/40 text-green-400' },
-      ]
-    : [
-        { v: 'long' as ReplayDecisionAction,     label: 'خرید',        icon: TrendingUp,   cls: 'border-green-500/40 text-green-400' },
-        { v: 'short' as ReplayDecisionAction,    label: 'فروش',        icon: TrendingDown, cls: 'border-red-500/40 text-red-400' },
-        { v: 'wait' as ReplayDecisionAction,     label: 'صبر کن',      icon: Clock,        cls: 'border-yellow-500/40 text-yellow-400' },
-        { v: 'no-trade' as ReplayDecisionAction, label: 'بدون معامله', icon: EyeOff,       cls: 'border-gray-500/40 text-gray-400' },
-      ];
-
-  return (
-    <div className="space-y-3 p-3 rounded-lg border border-border/60 bg-card/50" dir="rtl">
-      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">تصمیم شما</p>
-
-      {/* Action buttons */}
-      <div className="grid grid-cols-2 gap-2">
-        {actionButtons.map(btn => (
-          <button
-            key={btn.v}
-            onClick={() => setAction(btn.v)}
-            className={`flex items-center justify-center gap-2 p-2 rounded-lg border text-sm font-medium transition-all ${btn.cls} ${action === btn.v ? 'bg-muted/60 ring-1 ring-primary' : 'bg-background hover:bg-muted/30'}`}
-          >
-            <btn.icon className="h-4 w-4" />
-            {btn.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Trade parameters */}
-      {isTrade && (
-        <div className="grid grid-cols-2 gap-2">
-          <div>
-            <label className="text-[10px] text-muted-foreground">ورود</label>
-            <Input value={entry} onChange={e => setEntry(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="قیمت ورود" />
-          </div>
-          <div>
-            <label className="text-[10px] text-muted-foreground">ریسک %</label>
-            <Input value={risk} onChange={e => setRisk(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="1" type="number" />
-          </div>
-          <div>
-            <label className="text-[10px] text-muted-foreground">حد ضرر</label>
-            <Input value={sl} onChange={e => setSl(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="SL" />
-          </div>
-          <div>
-            <label className="text-[10px] text-muted-foreground">هدف</label>
-            <Input value={tp} onChange={e => setTp(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="TP" />
-          </div>
-        </div>
-      )}
-
-      {/* SL/TP edit for position management */}
-      {(action === 'move-sl' || action === 'move-tp') && (
-        <div className="grid grid-cols-2 gap-2">
-          {action === 'move-sl' && (
-            <div>
-              <label className="text-[10px] text-muted-foreground">حد ضرر جدید</label>
-              <Input value={sl} onChange={e => setSl(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="SL جدید" />
-            </div>
-          )}
-          {action === 'move-tp' && (
-            <div>
-              <label className="text-[10px] text-muted-foreground">هدف جدید</label>
-              <Input value={tp} onChange={e => setTp(e.target.value)} className="h-7 text-xs mt-0.5" placeholder="TP جدید" />
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Reasoning toggle */}
-      <button
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground w-full"
-        onClick={() => setShowReasoning(!showReasoning)}
-      >
-        {showReasoning ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-        {coachingMode === 'blind' ? 'استدلال (اختیاری)' : 'استدلال و تحلیل'}
-      </button>
-
-      {showReasoning && (
-        <div className="space-y-2 border-r border-border pr-2">
-          <div>
-            <label className="text-[10px] text-muted-foreground">چه می‌بینید؟</label>
-            <Textarea value={whatISee} onChange={e => setWhatISee(e.target.value)} placeholder="ساختار بازار، سطوح کلیدی..." rows={2} className="text-xs mt-0.5" />
-          </div>
-          {(action === 'long' || action === 'short') && (
-            <div>
-              <label className="text-[10px] text-muted-foreground">چرا وارد می‌شوید؟</label>
-              <Textarea value={whyEnter} onChange={e => setWhyEnter(e.target.value)} placeholder="دلیل ورود..." rows={2} className="text-xs mt-0.5" />
-            </div>
-          )}
-          <div>
-            <label className="text-[10px] text-muted-foreground">چه چیزی ایده را باطل می‌کند؟</label>
-            <Input value={invalidation} onChange={e => setInvalidation(e.target.value)} placeholder="invalidation..." className="h-7 text-xs mt-0.5" />
-          </div>
-          <div>
-            <label className="text-[10px] text-muted-foreground">شرایط بازار</label>
-            <Input value={marketCond} onChange={e => setMarketCond(e.target.value)} placeholder="trending / ranging / choppy..." className="h-7 text-xs mt-0.5" />
-          </div>
-          <div>
-            <label className="text-[10px] text-muted-foreground">اعتماد: {confidence}/10</label>
-            <input
-              type="range" min={1} max={10} value={confidence}
-              onChange={e => setConfidence(Number(e.target.value))}
-              className="w-full mt-0.5 accent-primary"
-            />
-          </div>
-        </div>
-      )}
-
-      <Button onClick={handleSubmit} disabled={!action} className="w-full gap-2" size="sm">
-        <CheckCircle2 className="h-4 w-4" />
-        ثبت تصمیم
-      </Button>
-    </div>
-  );
-}
-
-// ── Active Replay Engine ───────────────────────────────────────────
-
-interface ActiveReplayProps {
-  session: ReplaySession;
-  dataset: ReplayDataset | null;
-  onAdvance: () => void;
-  onDecision: (d: Parameters<DecisionPanelProps['onSubmit']>[0]) => void;
-  onClosePosition: (price: number) => void;
-  onUpdateSLTP: (sl?: number, tp?: number) => void;
-  onAbandon: () => void;
-  onComplete: () => void;
-  decisions: ReplayDecision[];
-  coachingMode: CoachingMode;
-}
-
-function ActiveReplay({
-  session, dataset, onAdvance, onDecision, onClosePosition, onUpdateSLTP,
-  onAbandon, onComplete, decisions, coachingMode,
-}: ActiveReplayProps) {
-  const [showDecision, setShowDecision] = useState(false);
-  const [closePrice, setClosePrice] = useState('');
-  const [showCloseDialog, setShowCloseDialog] = useState(false);
-  const [revealCount, setRevealCount] = useState(session.revealCount);
-  const [activeTF, setActiveTF] = useState<string>(session.timeframe ?? '');
-  const [mtfDatasets, setMtfDatasets] = useState<Record<string, ReplayDataset>>({});
-
-  // Load multi-timeframe datasets if present
-  useEffect(() => {
-    const additional = session.additionalDatasets
-      ? (() => { try { return JSON.parse(session.additionalDatasets!) as Record<string, string>; } catch { return {}; } })()
-      : {};
-    if (Object.keys(additional).length === 0) return;
-    const loadAll = async () => {
-      const loaded: Record<string, ReplayDataset> = {};
-      for (const [tf, dsId] of Object.entries(additional)) {
-        const ds = await datasetService.getById(dsId);
-        if (ds) loaded[tf] = ds;
-      }
-      setMtfDatasets(loaded);
-    };
-    loadAll();
-  }, [session.additionalDatasets]);
-
-  const activeDatasetForTF = activeTF && mtfDatasets[activeTF] ? mtfDatasets[activeTF] : dataset;
-
-  const candles = useMemo(() => activeDatasetForTF && activeDatasetForTF.type === 'candles'
-    ? datasetService.getCandles(activeDatasetForTF).slice(0, session.currentStep || 1)
-    : [], [activeDatasetForTF, session.currentStep]);
-
-  const screenshots = useMemo(() => dataset && dataset.type !== 'candles'
-    ? datasetService.getScreenshots(dataset)
-    : [], [dataset]);
-
-  const currentScreenshot = screenshots[session.currentStep - 1] ?? screenshots[0];
-  const progress = session.totalSteps > 0 ? (session.currentStep / session.totalSteps) * 100 : 0;
-  const hasPosition = !!session.simulatedEntry && !session.simulatedClosedAt;
-  const isComplete = session.status === 'completed';
-  const lastCandle = candles[candles.length - 1];
-
-  const handleDecision = (d: Parameters<DecisionPanelProps['onSubmit']>[0]) => {
-    onDecision(d);
-    if (d.action === 'close') {
-      setShowCloseDialog(true);
-    }
-    setShowDecision(false);
-  };
-
-  return (
-    <div className="space-y-3" dir="rtl">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="font-semibold text-sm">{session.title}</h3>
-          <p className="text-xs text-muted-foreground">
-            {session.symbol} · {session.mode === 'screenshot' ? 'تصویر' : session.mode === 'candle' ? 'کندل' : session.mode === 'trade' ? 'معامله' : session.mode} ·
-            <span className={` ml-1 ${coachingMode === 'blind' ? 'text-gray-400' : 'text-primary'}`}>
-              {coachingMode === 'blind' ? '🙈 حالت کور' : coachingMode === 'reflection' ? '🤔 بازتاب' : coachingMode === 'context' ? '📋 زمینه' : '🎓 مربی'}
-            </span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">{session.currentStep} / {session.totalSteps}</span>
-          <button onClick={onAbandon} className="p-1 hover:bg-muted/50 rounded text-muted-foreground" title="پایان دادن">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-
-      {/* Progress */}
-      <div className="h-1.5 bg-muted/40 rounded-full overflow-hidden">
-        <div className="h-full bg-primary transition-all rounded-full" style={{ width: `${progress}%` }} />
-      </div>
-
-      {/* Multi-Timeframe switcher */}
-      {(Object.keys(mtfDatasets).length > 0 || session.timeframe) && (
-        <div className="flex items-center gap-1.5 text-xs overflow-x-auto pb-0.5">
-          <span className="text-muted-foreground shrink-0 flex items-center gap-1">
-            <ArrowRightLeft className="h-3 w-3" />TF:
-          </span>
-          {/* Main TF */}
-          {session.timeframe && (
-            <button
-              onClick={() => setActiveTF(session.timeframe!)}
-              className={`px-2 py-0.5 rounded border text-xs shrink-0 transition-colors ${activeTF === session.timeframe ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted/50'}`}
-            >
-              {session.timeframe} {dataset?.type === 'candles' ? '' : dataset?.type === 'screenshots' ? '🖼️' : ''}
-            </button>
-          )}
-          {/* Additional TFs */}
-          {Object.entries(mtfDatasets).map(([tf, ds]) => (
-            <button key={tf}
-              onClick={() => setActiveTF(tf)}
-              className={`px-2 py-0.5 rounded border text-xs shrink-0 transition-colors ${activeTF === tf ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted/50'}`}
-            >
-              {tf} {ds.type === 'candles' ? '📊' : ds.type === 'screenshots' ? '🖼️' : ''}
-            </button>
-          ))}
-          {Object.keys(mtfDatasets).length === 0 && (
-            <span className="text-muted-foreground/50 text-[10px]">برای MTF چند دیتاست بارگذاری کنید</span>
-          )}
-        </div>
-      )}
-
-      {/* Position status */}
-      {hasPosition && (
-        <div className="flex items-center justify-between p-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-xs">
-          <div className="flex items-center gap-2">
-            {session.simulatedDirection === 'long'
-              ? <TrendingUp className="h-3.5 w-3.5 text-green-400" />
-              : <TrendingDown className="h-3.5 w-3.5 text-red-400" />}
-            <span className="font-medium">{session.simulatedDirection === 'long' ? 'خرید' : 'فروش'} @ {session.simulatedEntry}</span>
-          </div>
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <span className="text-red-400">SL: {session.simulatedSL}</span>
-            <span className="text-green-400">TP: {session.simulatedTP}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Main content */}
-      {dataset?.type === 'candles' && candles.length > 0 && (
-        <div className="rounded-lg border border-border/40 bg-card/30 p-2">
-          <CandleChart
-            candles={candles}
-            simulatedEntry={session.simulatedEntry}
-            simulatedSL={session.simulatedSL}
-            simulatedTP={session.simulatedTP}
-          />
-        </div>
-      )}
-
-      {(dataset?.type === 'screenshots' || dataset?.type === 'trade') && currentScreenshot && (
-        <ScreenshotViewer item={currentScreenshot} step={session.currentStep - 1} total={session.totalSteps} />
-      )}
-
-      {!dataset && session.mode === 'trade' && (
-        <div className="rounded-lg border border-border/40 bg-muted/20 p-4 text-sm text-muted-foreground text-center">
-          <Activity className="h-6 w-6 mx-auto mb-2 opacity-40" />
-          <p>داده‌های معامله — از تاریخچه معاملات ری‌پلی می‌شود</p>
-          {session.originalEntry && (
-            <p className="mt-1 text-xs">قیمت ورود اصلی پنهان است تا تصمیم بگیرید</p>
-          )}
-        </div>
-      )}
-
-      {/* Coaching hint (non-blind) */}
-      {coachingMode === 'reflection' && !showDecision && (
-        <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 space-y-1">
-          <p className="font-medium">🤔 سؤالات برای تفکر:</p>
-          <p>• آیا ستاپ معتبری می‌بینید؟</p>
-          <p>• نسبت ریسک به سود چقدر است؟</p>
-          <p>• آیا این معامله با قوانین شما سازگار است؟</p>
-        </div>
-      )}
-
-      {/* Decisions log */}
-      {decisions.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">تصمیمات ثبت‌شده</p>
-          {decisions.slice(-3).map(d => (
-            <div key={d.id} className="flex items-center justify-between text-xs p-1.5 rounded bg-muted/20">
-              <span className={`font-medium ${d.action === 'long' ? 'text-green-400' : d.action === 'short' ? 'text-red-400' : d.action === 'no-trade' ? 'text-gray-400' : 'text-yellow-400'}`}>
-                {d.action === 'long' ? '↑ خرید' : d.action === 'short' ? '↓ فروش' : d.action === 'no-trade' ? '✕ بدون معامله' : d.action === 'wait' ? '⌛ صبر' : d.action}
-              </span>
-              <span className="text-muted-foreground">مرحله {d.step}</span>
-              {d.qualityScore !== null && (
-                <span className={`font-medium ${d.qualityScore >= 70 ? 'text-green-400' : d.qualityScore >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
-                  {d.qualityScore}%
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Actions */}
-      {!isComplete && (
-        <div className="grid grid-cols-2 gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowDecision(!showDecision)}
-            className="gap-1.5"
-          >
-            <Flag className="h-4 w-4" />
-            {showDecision ? 'بستن پانل' : 'ثبت تصمیم'}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => onAdvance()}
-            className="gap-1.5"
-            disabled={session.currentStep >= session.totalSteps}
-          >
-            <Eye className="h-4 w-4" />
-            نمایش بعدی ({revealCount})
-          </Button>
-        </div>
-      )}
-
-      {/* Reveal count selector */}
-      {!isComplete && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>نمایش هر بار:</span>
-          {[1, 5, 10].map(n => (
-            <button
-              key={n}
-              onClick={() => setRevealCount(n)}
-              className={`px-2 py-0.5 rounded ${revealCount === n ? 'bg-primary text-primary-foreground' : 'bg-muted/40 hover:bg-muted/60'}`}
-            >
-              {n}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Decision panel */}
-      {showDecision && !isComplete && (
-        <DecisionPanel
-          onSubmit={handleDecision}
-          hasOpenPosition={hasPosition}
-          coachingMode={coachingMode}
-          lastCandle={lastCandle}
-        />
-      )}
-
-      {/* Complete button */}
-      {(session.currentStep >= session.totalSteps || isComplete) && (
-        <Button onClick={onComplete} className="w-full gap-2">
-          <CheckCircle2 className="h-4 w-4" />
-          مشاهده نتیجه و بررسی
-        </Button>
-      )}
-
-      {/* Close position dialog */}
-      <Dialog open={showCloseDialog} onOpenChange={setShowCloseDialog}>
-        <DialogContent dir="rtl">
-          <DialogHeader><DialogTitle>بستن موقعیت</DialogTitle></DialogHeader>
-          <div>
-            <label className="text-sm text-muted-foreground">قیمت بسته شدن</label>
-            <Input value={closePrice} onChange={e => setClosePrice(e.target.value)} placeholder="قیمت خروج" className="mt-2" type="number" />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCloseDialog(false)}>انصراف</Button>
-            <Button onClick={() => {
-              onClosePosition(parseFloat(closePrice) || session.simulatedEntry || 0);
-              setShowCloseDialog(false);
-            }}>تأیید</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-// ── Review Screen ──────────────────────────────────────────────────
-
-function ReviewScreen({
-  session, decisions, originalTrade, onSaveLessons, onClose, candles = [],
-}: {
-  session: ReplaySession;
-  decisions: ReplayDecision[];
-  originalTrade: Trade | undefined;
-  onSaveLessons: (lessons: string[]) => void;
-  onClose: () => void;
-  candles?: ReplayCandle[];
-}) {
-  const suggestions = useMemo(() => generateLessonSuggestion(session, decisions), [session, decisions]);
-  const [selectedLessons, setSelectedLessons] = useState<Set<number>>(new Set(suggestions.map((_, i) => i)));
-  const alternatives = useMemo(() => getAlternativeAnalysis(session, decisions, candles), [session, decisions, candles]);
-  const [customLesson, setCustomLesson] = useState('');
-  const avgQuality = decisions.length ? decisions.reduce((s, d) => s + (d.qualityScore ?? 50), 0) / decisions.length : null;
-
-  const mainDecision = decisions.find(d => d.action === 'long' || d.action === 'short');
-  const ptr = originalTrade ? (() => { try { return JSON.parse(originalTrade.postTradeReview || '{}'); } catch { return {}; } })() : null;
-
-  const handleSave = () => {
-    const lessons = [
-      ...suggestions.filter((_, i) => selectedLessons.has(i)),
-      ...(customLesson.trim() ? [customLesson.trim()] : []),
-    ];
-    onSaveLessons(lessons);
-  };
-
-  const qColor = avgQuality !== null
-    ? avgQuality >= 70 ? 'text-green-400' : avgQuality >= 40 ? 'text-yellow-400' : 'text-red-400'
-    : 'text-muted-foreground';
-
-  return (
-    <div className="space-y-4" dir="rtl">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold flex items-center gap-2"><Award className="h-5 w-5 text-primary" />بررسی ری‌پلی</h3>
-        <button onClick={onClose} className="p-1 hover:bg-muted/50 rounded text-muted-foreground"><X className="h-4 w-4" /></button>
-      </div>
-
-      {/* Score card */}
-      {avgQuality !== null && (
-        <Card className="border-primary/20">
-          <CardContent className="pt-4 pb-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs text-muted-foreground">کیفیت تصمیم‌گیری</p>
-                <p className={`text-3xl font-bold ${qColor}`}>{Math.round(avgQuality)}%</p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs text-muted-foreground">تعداد تصمیمات</p>
-                <p className="text-xl font-bold">{decisions.length}</p>
-              </div>
-              {session.simulatedRMultiple !== null && (
-                <div className="text-right">
-                  <p className="text-xs text-muted-foreground">نتیجه شبیه‌سازی</p>
-                  <p className={`text-xl font-bold ${session.simulatedRMultiple > 0 ? 'text-green-400' : session.simulatedRMultiple < 0 ? 'text-red-400' : 'text-yellow-400'}`}>
-                    {session.simulatedRMultiple > 0 ? '+' : ''}{session.simulatedRMultiple.toFixed(2)}R
-                  </p>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Comparison table */}
-      <Card>
-        <CardHeader className="pb-2"><CardTitle className="text-sm">مقایسه تصمیم‌ها</CardTitle></CardHeader>
-        <CardContent className="space-y-2 text-xs">
-          <div className="grid grid-cols-3 gap-2 text-center font-medium text-muted-foreground border-b border-border pb-2">
-            <span>ری‌پلی شما</span>
-            <span>معامله اصلی</span>
-            <span>نتیجه واقعی</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <span className={session.simulatedResult === 'win' ? 'text-green-400' : session.simulatedResult === 'loss' ? 'text-red-400' : 'text-yellow-400'}>
-              {session.simulatedResult === 'win' ? '✅ برد' : session.simulatedResult === 'loss' ? '❌ ضرر' : session.simulatedResult === 'no-trade' ? '— معامله نکرد' : '⏳ بدون بستن'}
-            </span>
-            <span className={originalTrade?.result === 'win' ? 'text-green-400' : originalTrade?.result === 'loss' ? 'text-red-400' : 'text-muted-foreground'}>
-              {originalTrade?.result === 'win' ? '✅ برد' : originalTrade?.result === 'loss' ? '❌ ضرر' : originalTrade?.result ?? '—'}
-            </span>
-            <span className={originalTrade?.rMultiple !== undefined && originalTrade.rMultiple !== null
-              ? originalTrade.rMultiple > 0 ? 'text-green-400' : 'text-red-400'
-              : 'text-muted-foreground'}>
-              {originalTrade?.rMultiple !== null && originalTrade?.rMultiple !== undefined
-                ? `${originalTrade.rMultiple > 0 ? '+' : ''}${originalTrade.rMultiple.toFixed(2)}R`
-                : '—'}
-            </span>
-          </div>
-
-          {mainDecision && (
-            <div className="grid grid-cols-3 gap-2 text-center text-muted-foreground mt-1">
-              <span>ورود: {mainDecision.entryPrice ?? '—'}</span>
-              <span>ورود: {originalTrade?.entryPrice ?? '—'}</span>
-              <span>خروج: {originalTrade?.exitPrice ?? '—'}</span>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Main decision reasoning */}
-      {mainDecision && (mainDecision.whatISee || mainDecision.whyEnter) && (
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">تحلیل شما</CardTitle></CardHeader>
-          <CardContent className="text-xs space-y-1.5">
-            {mainDecision.whatISee && (
-              <div><span className="text-muted-foreground">دیدگاه: </span>{mainDecision.whatISee}</div>
-            )}
-            {mainDecision.whyEnter && (
-              <div><span className="text-muted-foreground">دلیل ورود: </span>{mainDecision.whyEnter}</div>
-            )}
-            {mainDecision.confidence !== null && (
-              <div><span className="text-muted-foreground">اعتماد: </span>{mainDecision.confidence}/10</div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* PTR from original trade */}
-      {ptr?.goodThings && (
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">بررسی معامله اصلی</CardTitle></CardHeader>
-          <CardContent className="text-xs space-y-1">
-            {ptr.goodThings && <div><span className="text-green-400">✓ </span>{ptr.goodThings}</div>}
-            {ptr.badThings  && <div><span className="text-red-400">✗ </span>{ptr.badThings}</div>}
-            {ptr.lesson     && <div><span className="text-yellow-400">درس: </span>{ptr.lesson}</div>}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Alternative Decision Analysis */}
-      {alternatives.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <GitBranch className="h-4 w-4 text-primary" />
-              تحلیل «اگر...» — سناریوهای جایگزین
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {alternatives.map((alt, i) => (
-                <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-muted/20 border border-border/30 text-xs gap-2">
-                  <div className="min-w-0">
-                    <p className="font-medium">{alt.label}</p>
-                    <p className="text-muted-foreground truncate">{alt.description}</p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {alt.rMultiple !== null && (
-                      <span className={`font-bold ${alt.result === 'win' ? 'text-green-400' : alt.result === 'loss' ? 'text-red-400' : 'text-yellow-400'}`}>
-                        {alt.rMultiple > 0 ? '+' : ''}{alt.rMultiple.toFixed(2)}R
-                      </span>
-                    )}
-                    <span className="text-muted-foreground">{alt.diff}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Lesson suggestions */}
-      {suggestions.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <BookOpen className="h-4 w-4 text-primary" />
-              پیشنهاد درس‌ها
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {suggestions.map((s, i) => (
-              <label key={i} className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={selectedLessons.has(i)}
-                  onChange={e => setSelectedLessons(prev => {
-                    const n = new Set(prev);
-                    e.target.checked ? n.add(i) : n.delete(i);
-                    return n;
-                  })}
-                  className="mt-0.5 rounded"
-                />
-                <span className="text-xs">{s}</span>
-              </label>
-            ))}
-            <div>
-              <label className="text-[10px] text-muted-foreground">درس اختصاصی</label>
-              <Input value={customLesson} onChange={e => setCustomLesson(e.target.value)} placeholder="یادداشت خودتان..." className="h-7 text-xs mt-0.5" />
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <div className="flex gap-2">
-        <Button variant="outline" onClick={onClose} className="flex-1">بستن</Button>
-        <Button onClick={handleSave} className="flex-1 gap-1.5">
-          <BookOpen className="h-4 w-4" />
-          ذخیره در دانش
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ── Dataset Import Dialog ──────────────────────────────────────────
-
-function DatasetImportDialog({ open, onClose, onImported }: {
-  open: boolean;
-  onClose: () => void;
-  onImported: (ds: ReplayDataset) => void;
-}) {
-  const [tab, setTab] = useState<'csv' | 'screenshots' | 'trade' | 'manual' | 'json'>('csv');
-  const [name, setName] = useState('');
-  const [symbol, setSymbol] = useState('');
-  const [timeframe, setTimeframe] = useState('15M');
-  const [csvContent, setCsvContent] = useState('');
-  const [screenshots, setScreenshots] = useState<ReplayScreenshotItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [selectedTradeId, setSelectedTradeId] = useState('');
-  const [jsonContent, setJsonContent] = useState('');
-  // Manual candle entry
-  const [manualCandles, setManualCandles] = useState<Array<{
-    date: string; open: string; high: string; low: string; close: string; volume: string;
-  }>>([{ date: '', open: '', high: '', low: '', close: '', volume: '' }]);
-  const { toast } = useToast();
-
-  useEffect(() => {
-    if (open && tab === 'trade') {
-      db.trades.where('status').equals('closed').toArray().then(ts => setTrades(ts.slice(0, 50)));
-    }
-  }, [open, tab]);
-
-  const handleCSVFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!name) setName(file.name.replace('.csv', ''));
-    const reader = new FileReader();
-    reader.onload = ev => setCsvContent(ev.target?.result as string);
-    reader.readAsText(file);
-  };
-
-  const handleScreenshotFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    files.forEach((file, i) => {
-      const reader = new FileReader();
-      reader.onload = ev => {
-        setScreenshots(prev => [...prev, {
-          dataUrl: ev.target?.result as string,
-          label: file.name.replace(/\.[^.]+$/, '') || `مرحله ${i + 1}`,
-          timeframe,
-        }]);
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const handleImport = async (): Promise<void> => {
-    if (tab !== 'trade' && !symbol.trim()) { toast({ title: 'نماد الزامی است', variant: 'destructive' }); return; }
-
-    setLoading(true);
-    try {
-      let ds: ReplayDataset;
-      if (tab === 'csv') {
-        if (!csvContent) throw new Error('فایل CSV انتخاب نشده');
-        ds = await datasetService.createFromCSV(name || `${symbol} ${timeframe}`, symbol.toUpperCase(), timeframe, csvContent);
-      } else if (tab === 'screenshots') {
-        if (screenshots.length === 0) throw new Error('تصویری انتخاب نشده');
-        ds = await datasetService.createFromScreenshots(name || `${symbol} screenshots`, symbol.toUpperCase(), timeframe, screenshots);
-      } else if (tab === 'trade') {
-        if (!selectedTradeId) throw new Error('معامله‌ای انتخاب نشده');
-        ds = await datasetService.createFromTrade(selectedTradeId);
-      } else if (tab === 'manual') {
-        // Build CSV from manual rows
-        const validRows = manualCandles.filter(r => r.open && r.close);
-        if (validRows.length === 0) throw new Error('حداقل یک کندل کامل وارد کنید');
-        const csvLines = ['timestamp,open,high,low,close,volume',
-          ...validRows.map(r => {
-            const ts = r.date ? new Date(r.date).getTime() : Date.now();
-            const o = parseFloat(r.open), c = parseFloat(r.close);
-            const h = r.high ? parseFloat(r.high) : Math.max(o, c);
-            const l = r.low ? parseFloat(r.low) : Math.min(o, c);
-            const v = r.volume ? parseFloat(r.volume) : '';
-            return `${ts},${o},${h},${l},${c},${v}`;
-          }),
-        ];
-        ds = await datasetService.createFromCSV(name || `${symbol} ${timeframe}`, symbol.toUpperCase(), timeframe, csvLines.join('\n'));
-      } else {
-        // JSON import
-        if (!jsonContent.trim()) throw new Error('JSON خالی است');
-        const parsed = JSON.parse(jsonContent);
-        // Support array of {t/time/timestamp, o/open, h/high, l/low, c/close, v/volume}
-        const candles: ReplayCandle[] = (Array.isArray(parsed) ? parsed : parsed.candles ?? parsed.data ?? []).map((item: Record<string, unknown>) => ({
-          timestamp: Number(item.t ?? item.time ?? item.timestamp ?? 0),
-          open: Number(item.o ?? item.open ?? 0),
-          high: Number(item.h ?? item.high ?? 0),
-          low: Number(item.l ?? item.low ?? 0),
-          close: Number(item.c ?? item.close ?? 0),
-          volume: item.v !== undefined ? Number(item.v) : item.volume !== undefined ? Number(item.volume) : undefined,
-          timeframe,
-        }));
-        if (candles.length === 0) throw new Error('هیچ کندلی در JSON یافت نشد');
-        const now = Date.now();
-        const d: ReplayDataset = {
-          id: crypto.randomUUID(), name: name || `${symbol} ${timeframe} JSON`,
-          symbol: symbol.toUpperCase(), timeframe, type: 'candles',
-          data: JSON.stringify(candles.sort((a, b) => a.timestamp - b.timestamp)),
-          sourceTradeId: null, totalItems: candles.length,
-          startDate: candles[0]?.timestamp ?? null,
-          endDate: candles[candles.length - 1]?.timestamp ?? null,
-          tags: '[]', notes: null, createdAt: now, updatedAt: now,
-        };
-        await db.replayDatasets.add(d);
-        ds = d;
-      }
-      toast({ title: `دیتاست وارد شد — ${ds.totalItems} مورد` });
-      onImported(ds);
-      onClose();
-    } catch (err) {
-      toast({ title: 'خطا در وارد کردن', description: String(err), variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" dir="rtl">
-        <DialogHeader><DialogTitle className="flex items-center gap-2"><Upload className="h-4 w-4" />وارد کردن داده تاریخی</DialogTitle></DialogHeader>
-
-        <div className="grid grid-cols-5 gap-0.5 bg-muted/30 rounded-lg p-1">
-          {(['csv', 'screenshots', 'trade', 'manual', 'json'] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)}
-              className={`text-[10px] py-1.5 rounded-md transition-colors ${tab === t ? 'bg-background text-foreground shadow' : 'text-muted-foreground hover:text-foreground'}`}>
-              {t === 'csv' ? '📊 CSV' : t === 'screenshots' ? '🖼️ عکس' : t === 'trade' ? '📈 معامله' : t === 'manual' ? '✏️ دستی' : '{ } JSON'}
-            </button>
-          ))}
-        </div>
-
-        <div className="space-y-3">
-          {tab !== 'trade' && (
-            <>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-muted-foreground">نماد *</label>
-                  <Input value={symbol} onChange={e => setSymbol(e.target.value)} placeholder="XAUUSD" className="mt-1 h-8" />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground">تایم‌فریم</label>
-                  <Select value={timeframe} onValueChange={setTimeframe}>
-                    <SelectTrigger className="mt-1 h-8 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {['1M','5M','15M','1H','4H','1D'].map(tf => <SelectItem key={tf} value={tf}>{tf}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">نام دیتاست</label>
-                <Input value={name} onChange={e => setName(e.target.value)} placeholder="مثال: XAUUSD M15 مهر ۱۴۰۳" className="mt-1 h-8" />
-              </div>
-            </>
-          )}
-
-          {tab === 'csv' && (
-            <div>
-              <label className="text-xs text-muted-foreground">فایل CSV (timestamp,open,high,low,close,volume)</label>
-              <input type="file" accept=".csv,.txt" onChange={handleCSVFile} className="mt-1 block text-xs text-muted-foreground file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:bg-primary file:text-primary-foreground cursor-pointer" />
-              {csvContent && <p className="text-[10px] text-green-400 mt-1">✓ فایل بارگذاری شد</p>}
-              <div className="mt-2 p-2 bg-muted/30 rounded text-[10px] text-muted-foreground">
-                <p>فرمت پشتیبانی‌شده:</p>
-                <p>timestamp,open,high,low,close,volume</p>
-                <p>2024-01-15 09:00,1920.5,1921.0,1919.8,1920.8,1500</p>
-              </div>
-              <div className="mt-2">
-                <p className="text-[10px] text-muted-foreground mb-1">یا ورودی متنی:</p>
-                <Textarea value={csvContent} onChange={e => setCsvContent(e.target.value)} placeholder="timestamp,open,high,low,close&#10;..." rows={4} className="text-xs font-mono" />
-              </div>
-            </div>
-          )}
-
-          {tab === 'screenshots' && (
-            <div>
-              <label className="text-xs text-muted-foreground">تصاویر (به‌ترتیب زمانی)</label>
-              <input type="file" accept="image/*" multiple onChange={handleScreenshotFiles} className="mt-1 block text-xs text-muted-foreground file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:bg-primary file:text-primary-foreground cursor-pointer" />
-              {screenshots.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {screenshots.map((s, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <img src={s.dataUrl} className="h-8 w-12 object-cover rounded" alt="" />
+                   source={s.dataUrl}
+                        className="h-8 w-12 object-cover rounded"
+                        alt=""
+                        enableViewer
+                        showDownload
+                        filename={s.label || 'replay-screenshot'}
+                      />
                       <Input
                         value={s.label}
                         onChange={e => setScreenshots(prev => prev.map((x, j) => j === i ? { ...x, label: e.target.value } : x))}
@@ -1617,23 +617,32 @@ export default function TradeReplay() {
   const [showPlaylistCreate, setShowPlaylistCreate] = useState(false);
   const [activeTab, setActiveTab] = useState('start');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const { toast } = useToast();
 
   const load = useCallback(async () => {
-    const [ds, ss, pl, an, sg] = await Promise.all([
-      datasetService.getAll(),
-      sessionService.getAll(),
-      playlistService.getAll(),
-      getReplayAnalytics(),
-      getPersonalizedSuggestions(),
-    ]);
-    setDatasets(ds);
-    setSessions(ss);
-    setPlaylists(pl);
-    setAnalytics(an);
-    setSuggestions(sg);
-    setLoading(false);
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [ds, ss, pl, an, sg] = await Promise.all([
+        datasetService.getAll(),
+        sessionService.getAll(),
+        playlistService.getAll(),
+        getReplayAnalytics(),
+        getPersonalizedSuggestions(),
+      ]);
+      setDatasets(ds);
+      setSessions(ss);
+      setPlaylists(pl);
+      setAnalytics(an);
+      setSuggestions(sg);
+    } catch (error) {
+      console.error('[TradeReplay] load failed', error);
+      setLoadError('بارگذاری داده‌های ری‌پلی انجام نشد. پایگاه داده محلی را دوباره امتحان کنید.');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -1641,72 +650,122 @@ export default function TradeReplay() {
   // Load active session decisions
   useEffect(() => {
     if (activeSession) {
-      decisionService.forSession(activeSession.id).then(setActiveDecisions);
+      let cancelled = false;
+      decisionService.forSession(activeSession.id)
+        .then(decisions => { if (!cancelled) setActiveDecisions(decisions); })
+        .catch(error => {
+          if (!cancelled) {
+            console.error('[TradeReplay] decisions load failed', error);
+            toast({ title: 'تصمیم‌های این جلسه بارگذاری نشد', variant: 'destructive' });
+            setActiveDecisions([]);
+          }
+        });
+      return () => { cancelled = true; };
     }
+    setActiveDecisions([]);
+    return undefined;
   }, [activeSession?.id, activeSession?.currentStep]);
 
   const handleStartReplay = async (params: Parameters<typeof sessionService.create>[0]) => {
-    const session = await sessionService.create(params);
-    const ds = params.datasetId ? await datasetService.getById(params.datasetId) : null;
-    setActiveSession(session);
-    setActiveDataset(ds ?? null);
-    setShowReview(false);
-    setActiveTab('active');
-    if (session.sourceTradeId) {
-      const trade = await db.trades.get(session.sourceTradeId);
-      setOriginalTrade(trade);
+    try {
+      const session = await sessionService.create(params);
+      const ds = params.datasetId ? await datasetService.getById(params.datasetId) : null;
+      setActiveSession(session);
+      setActiveDataset(ds ?? null);
+      setShowReview(false);
+      setActiveTab('active');
+      if (session.sourceTradeId) {
+        const trade = await db.trades.get(session.sourceTradeId);
+        setOriginalTrade(trade);
+      } else {
+        setOriginalTrade(undefined);
+      }
+      const advanced = await sessionService.advance(session.id, session.revealCount);
+      if (advanced) setActiveSession(advanced);
+    } catch (error) {
+      console.error('[TradeReplay] start failed', error);
+      toast({ title: 'شروع ری‌پلی انجام نشد', description: 'دیتاست حذف شده یا ناقص است.', variant: 'destructive' });
     }
-    // Advance to show initial context
-    const advanced = await sessionService.advance(session.id, session.revealCount);
-    if (advanced) setActiveSession(advanced);
   };
 
   const handleAdvance = async () => {
     if (!activeSession) return;
-    const advanced = await sessionService.advance(activeSession.id, activeSession.revealCount);
-    if (advanced) {
-      setActiveSession(advanced);
-      if (advanced.status === 'completed') toast({ title: 'داده کامل نمایش داده شد' });
+    try {
+      const advanced = await sessionService.advance(activeSession.id, activeSession.revealCount);
+      if (advanced) {
+        setActiveSession(advanced);
+        if (advanced.status === 'completed') toast({ title: 'داده کامل نمایش داده شد' });
+      }
+    } catch (error) {
+      console.error('[TradeReplay] advance failed', error);
+      toast({ title: 'نمایش مرحله بعد انجام نشد', variant: 'destructive' });
     }
   };
 
   const handleDecision = async (d: Parameters<typeof decisionService.log>[1]) => {
     if (!activeSession) return;
-    const decision = await decisionService.log(activeSession.id, { ...d, step: activeSession.currentStep });
-    // Score it
-    const candles = activeDataset ? datasetService.getCandles(activeDataset) : [];
-    await decisionService.scoreDecision(decision.id, activeSession, candles, activeSession.currentStep);
+    try {
+      const decision = await decisionService.log(activeSession.id, { ...d, step: activeSession.currentStep });
+      const candles = activeDataset ? datasetService.getCandles(activeDataset) : [];
+      await decisionService.scoreDecision(decision.id, activeSession, candles, activeSession.currentStep);
 
-    // If trade decision, open simulated position
-    if (d.action === 'long' || d.action === 'short') {
-      await sessionService.openSimulatedPosition(activeSession.id, {
-        direction: d.action,
-        entry: d.entryPrice ?? 0,
-        sl: d.stopLoss ?? 0,
-        tp: d.takeProfit ?? 0,
-        riskPercent: d.riskPercent,
-      });
-      const updated = await db.replaySessions.get(activeSession.id);
-      if (updated) setActiveSession(updated);
+      if (d.action === 'long' || d.action === 'short') {
+        const entry = d.entryPrice;
+        const sl = d.stopLoss;
+        const tp = d.takeProfit;
+        if (
+          typeof entry !== 'number' || !Number.isFinite(entry)
+          || typeof sl !== 'number' || !Number.isFinite(sl)
+          || typeof tp !== 'number' || !Number.isFinite(tp)
+        ) {
+          throw new Error('قیمت ورود، حد ضرر و حد سود باید معتبر باشند');
+        }
+        await sessionService.openSimulatedPosition(activeSession.id, {
+          direction: d.action,
+          entry,
+          sl,
+          tp,
+          riskPercent: d.riskPercent,
+        });
+        const updated = await db.replaySessions.get(activeSession.id);
+        if (updated) setActiveSession(updated);
+      }
+
+      const updatedDecisions = await decisionService.forSession(activeSession.id);
+      setActiveDecisions(updatedDecisions);
+      toast({ title: 'تصمیم ثبت شد ✓' });
+    } catch (error) {
+      console.error('[TradeReplay] decision failed', error);
+      toast({ title: 'ثبت تصمیم انجام نشد', description: error instanceof Error ? error.message : undefined, variant: 'destructive' });
     }
-
-    const updatedDecisions = await decisionService.forSession(activeSession.id);
-    setActiveDecisions(updatedDecisions);
-    toast({ title: 'تصمیم ثبت شد ✓' });
   };
 
   const handleClosePosition = async (price: number) => {
     if (!activeSession) return;
-    await sessionService.closeSimulatedPosition(activeSession.id, price);
-    const updated = await db.replaySessions.get(activeSession.id);
-    if (updated) setActiveSession(updated);
+    if (!Number.isFinite(price)) {
+      toast({ title: 'قیمت خروج معتبر نیست', variant: 'destructive' });
+      return;
+    }
+    try {
+      await sessionService.closeSimulatedPosition(activeSession.id, price);
+      const updated = await db.replaySessions.get(activeSession.id);
+      if (updated) setActiveSession(updated);
+    } catch (error) {
+      console.error('[TradeReplay] close position failed', error);
+      toast({ title: 'بستن موقعیت انجام نشد', variant: 'destructive' });
+    }
   };
 
   const handleUpdateSLTP = async (sl?: number, tp?: number) => {
     if (!activeSession) return;
-    await sessionService.updateSLTP(activeSession.id, sl, tp);
-    const updated = await db.replaySessions.get(activeSession.id);
-    if (updated) setActiveSession(updated);
+    try {
+      await sessionService.updateSLTP(activeSession.id, sl, tp);
+      const updated = await db.replaySessions.get(activeSession.id);
+      if (updated) setActiveSession(updated);
+    } catch (error) {
+      console.error('[TradeReplay] SL/TP update failed', error);
+      toast({ title: 'به‌روزرسانی SL/TP انجام نشد', variant: 'destructive' });
+    }
   };
 
   const handleComplete = () => setShowReview(true);
@@ -1778,6 +837,16 @@ export default function TradeReplay() {
           {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)}
         </div>
         <Skeleton className="h-48 rounded-xl" />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="max-w-3xl mx-auto py-16 text-center space-y-3" dir="rtl">
+        <AlertCircle className="h-10 w-10 mx-auto text-destructive" />
+        <p className="font-medium">{loadError}</p>
+        <Button onClick={load} className="gap-2"><RefreshCw className="h-4 w-4" />تلاش دوباره</Button>
       </div>
     );
   }
@@ -1942,27 +1011,31 @@ export default function TradeReplay() {
         {/* ── ACTIVE REPLAY TAB ── */}
         <TabsContent value="active">
           {showReview && activeSession ? (
-            <ReviewScreen
+              <ReplayErrorBoundary key={`review-${activeSession.id}`}>
+                <ReviewScreen
               session={activeSession}
               decisions={activeDecisions}
               originalTrade={originalTrade}
               onSaveLessons={handleSaveLessons}
               onClose={() => { setShowReview(false); setActiveSession(null); setActiveTab('history'); load(); }}
               candles={activeDataset ? datasetService.getCandles(activeDataset) : []}
-            />
+                />
+              </ReplayErrorBoundary>
           ) : activeSession ? (
-            <ActiveReplay
-              session={activeSession}
-              dataset={activeDataset}
-              onAdvance={handleAdvance}
-              onDecision={handleDecision}
-              onClosePosition={handleClosePosition}
-              onUpdateSLTP={handleUpdateSLTP}
-              onAbandon={handleAbandon}
-              onComplete={handleComplete}
-              decisions={activeDecisions}
-              coachingMode={activeSession.coachingMode}
-            />
+            <ReplayErrorBoundary key={`active-${activeSession.id}-${activeSession.datasetId ?? 'none'}`}>
+              <ActiveReplay
+                session={activeSession}
+                dataset={activeDataset}
+                onAdvance={handleAdvance}
+                onDecision={handleDecision}
+                onClosePosition={handleClosePosition}
+                onUpdateSLTP={handleUpdateSLTP}
+                onAbandon={handleAbandon}
+                onComplete={handleComplete}
+                decisions={activeDecisions}
+                coachingMode={activeSession.coachingMode}
+              />
+            </ReplayErrorBoundary>
           ) : (
             <div className="text-center py-16 text-muted-foreground">
               <RotateCcw className="h-12 w-12 mx-auto mb-4 opacity-20" />
