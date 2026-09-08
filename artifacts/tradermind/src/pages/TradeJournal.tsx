@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Link, useLocation } from "wouter";
 import { Skeleton } from "../components/ui/skeleton";
@@ -10,9 +10,11 @@ import { Trade, Strategy, Account, TradingBox } from "../db/database";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
+import { Checkbox } from "../components/ui/checkbox";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "../components/ui/dialog";
 import {
-  PlusCircle, TrendingUp, TrendingDown, Search, Filter,
-  CalendarIcon, ChevronDown, ChevronUp, Upload, CreditCard, Box,
+  PlusCircle, TrendingUp, Search, Filter,
+  CalendarIcon, ChevronDown, ChevronUp, CreditCard, Box, Trash2,
 } from "lucide-react";
 import { scoreOneTrade } from "../services/dataQualityService";
 import { format } from "date-fns";
@@ -28,7 +30,16 @@ const CARD_HEIGHT = 156; // px — ارتفاع هر کارت موبایل
 function TradeListVirtualized({
   trades,
   onSelect,
-}: { trades: Trade[]; onSelect: (id: string) => void }) {
+  selectedIds,
+  onToggle,
+  onSelectAll,
+}: {
+  trades: Trade[];
+  onSelect: (id: string) => void;
+  selectedIds: Set<string>;
+  onToggle: (id: string) => void;
+  onSelectAll: () => void;
+}) {
   const tableRef = useRef<HTMLDivElement>(null);
   const mobileRef = useRef<HTMLDivElement>(null);
 
@@ -54,6 +65,12 @@ function TradeListVirtualized({
           <table className="w-full text-sm whitespace-nowrap">
             <thead className="text-xs text-muted-foreground uppercase bg-muted/30 border-b sticky top-0 z-10">
               <tr>
+                <th className="px-3 py-3 w-10">
+                  <Checkbox
+                    checked={trades.length > 0 && selectedIds.size === trades.length}
+                    onCheckedChange={onSelectAll}
+                  />
+                </th>
                 <th className="px-4 py-3 font-medium text-right">تاریخ</th>
                 <th className="px-4 py-3 font-medium text-right">نماد</th>
                 <th className="px-4 py-3 font-medium text-right">جهت</th>
@@ -68,7 +85,6 @@ function TradeListVirtualized({
             </thead>
           </table>
         </div>
-        {/* scrollable body — max 600px برای فعال شدن virtual scroll */}
         <div ref={tableRef} className="overflow-y-auto max-h-[600px]" style={{ overscrollBehavior: 'contain' }}>
           <div style={{ height: tableVirtualizer.getTotalSize(), position: 'relative' }}>
             <table className="w-full text-sm whitespace-nowrap">
@@ -76,15 +92,19 @@ function TradeListVirtualized({
                 {tableVirtualizer.getVirtualItems().map(vi => {
                   const trade = trades[vi.index];
                   const s = scoreOneTrade(trade).score;
+                  const isSelected = selectedIds.has(trade.id);
                   return (
                     <tr
                       key={trade.id}
                       data-index={vi.index}
                       ref={tableVirtualizer.measureElement}
                       onClick={() => onSelect(trade.id)}
-                      className="hover:bg-muted/30 transition-colors cursor-pointer border-b last:border-b-0"
+                      className={`hover:bg-muted/30 transition-colors cursor-pointer border-b last:border-b-0 ${isSelected ? 'bg-primary/5' : ''}`}
                       style={{ position: 'absolute', top: vi.start, width: '100%', display: 'table-row' }}
                     >
+                      <td className="px-3 py-3 w-10" onClick={e => { e.stopPropagation(); onToggle(trade.id); }}>
+                        <Checkbox checked={isSelected} />
+                      </td>
                       <td className="px-4 py-3 text-muted-foreground w-[120px]">
                         {format(new Date(trade.openedAt), 'MM/dd HH:mm')}
                       </td>
@@ -143,6 +163,7 @@ function TradeListVirtualized({
           {mobileVirtualizer.getVirtualItems().map(vi => {
             const trade = trades[vi.index];
             const s = scoreOneTrade(trade).score;
+            const isSelected = selectedIds.has(trade.id);
             return (
               <div
                 key={trade.id}
@@ -150,11 +171,14 @@ function TradeListVirtualized({
                 ref={mobileVirtualizer.measureElement}
                 style={{ position: 'absolute', top: vi.start, width: '100%', paddingBottom: 12 }}
               >
-                <Card className="cursor-pointer hover:border-primary/50 transition-colors card-pressable"
+                <Card className={`cursor-pointer hover:border-primary/50 transition-colors card-pressable ${isSelected ? 'border-primary/50 bg-primary/5' : ''}`}
                   onClick={() => onSelect(trade.id)}>
                   <CardContent className="p-4 space-y-3">
                     <div className="flex justify-between items-start gap-2">
                       <div className="flex items-center gap-2 min-w-0">
+                        <div onClick={e => { e.stopPropagation(); onToggle(trade.id); }}>
+                          <Checkbox checked={isSelected} />
+                        </div>
                         <h3 className="font-bold text-lg truncate">{trade.symbol}</h3>
                         <Badge variant="outline" className={`h-5 text-[10px] shrink-0 ${trade.direction === 'long'
                           ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20'
@@ -233,6 +257,45 @@ const ADHERENCE_FA: Record<string, string> = {
   fully: 'کاملاً', mostly: 'تا حد زیادی', partially: 'کمی', not: 'اصلاً',
 };
 
+type TradeJournalFilters = {
+  search: string;
+  result: string;
+  direction: string;
+  strategyId: string;
+  emotion: string;
+  adherenceRating: string;
+  dateFrom: string;
+  dateTo: string;
+  accountId: string;
+  boxId: string;
+};
+
+function getRouteSearch(location: string): string {
+  if (location.includes('?')) return location.slice(location.indexOf('?') + 1);
+  if (typeof window !== 'undefined' && window.location.protocol === 'file:') {
+    const hash = window.location.hash.replace(/^#/, '');
+    const queryIndex = hash.indexOf('?');
+    return queryIndex >= 0 ? hash.slice(queryIndex + 1) : '';
+  }
+  return typeof window !== 'undefined' ? window.location.search.replace(/^\?/, '') : '';
+}
+
+function buildTradeJournalPath(filters: TradeJournalFilters): string {
+  const params = new URLSearchParams();
+  const defaults: Record<keyof TradeJournalFilters, string> = {
+    search: '', result: 'all', direction: 'all', strategyId: 'all',
+    emotion: 'all', adherenceRating: 'all', dateFrom: '', dateTo: '',
+    accountId: 'all', boxId: 'all',
+  };
+
+  (Object.keys(defaults) as (keyof TradeJournalFilters)[]).forEach(key => {
+    if (filters[key] !== defaults[key]) params.set(key, filters[key]);
+  });
+
+  const query = params.toString();
+  return query ? `/journal/trades?${query}` : '/journal/trades';
+}
+
 export default function TradeJournal() {
   const [location, setLocation] = useLocation();
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -242,13 +305,24 @@ export default function TradeJournal() {
   const [stats, setStats] = useState({ total: 0, winRate: 0, totalPnl: 0, avgRMultiple: 0 });
   const [loading, setLoading] = useState(true);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // خواندن پارامترهای URL برای پیش‌فیلتر (مثلاً ?boxId=xxx از صفحه باکس‌ها)
-  const urlParams = useMemo(() => new URLSearchParams(location.includes('?') ? location.split('?')[1] : ''), [location]);
+  const urlParams = useMemo(() => new URLSearchParams(getRouteSearch(location)), [location]);
 
-  const [filters, setFilters] = useState({
-    search: '', result: 'all', direction: 'all', strategyId: 'all',
-    emotion: 'all', adherenceRating: 'all', dateFrom: '', dateTo: '',
+  const [filters, setFilters] = useState<TradeJournalFilters>({
+    // The URL is the source of truth so the filter survives list → detail →
+    // edit → save navigation and a page remount.
+    search: urlParams.get('search') || '',
+    result: urlParams.get('result') || 'all',
+    direction: urlParams.get('direction') || 'all',
+    strategyId: urlParams.get('strategyId') || 'all',
+    emotion: urlParams.get('emotion') || 'all',
+    adherenceRating: urlParams.get('adherenceRating') || 'all',
+    dateFrom: urlParams.get('dateFrom') || '',
+    dateTo: urlParams.get('dateTo') || '',
     accountId: urlParams.get('accountId') || 'all',
     boxId: urlParams.get('boxId') || 'all',
   });
@@ -258,7 +332,7 @@ export default function TradeJournal() {
     accountService.getAll().then(setAccounts);
     tradingBoxService.getAll().then(setTradingBoxes);
     // اگر فیلتر URL وجود داشت، پنل فیلتر را باز کن
-    if (urlParams.get('boxId') || urlParams.get('accountId')) setFiltersOpen(true);
+    if ([...urlParams.keys()].length > 0) setFiltersOpen(true);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadData(); }, [filters]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -279,15 +353,47 @@ export default function TradeJournal() {
     setLoading(false);
   };
 
-  const handleFilterChange = (key: string, value: string) =>
-    setFilters(prev => ({ ...prev, [key]: value }));
+  const handleFilterChange = (key: keyof TradeJournalFilters, value: string) => {
+    setFilters(prev => {
+      const next = { ...prev, [key]: value };
+      setLocation(buildTradeJournalPath(next));
+      return next;
+    });
+  };
+
+  const handleToggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(prev => prev.size === trades.length ? new Set() : new Set(trades.map(t => t.id)));
+  }, [trades]);
+
+  const handleBulkDelete = async () => {
+    setBulkDeleting(true);
+    const count = selectedIds.size;
+    for (const id of selectedIds) {
+      await tradeService.deleteTrade(id);
+    }
+    setSelectedIds(new Set());
+    setShowBulkDeleteDialog(false);
+    setBulkDeleting(false);
+    await loadData();
+    const { toast } = await import('sonner');
+    toast.success(`${count} معامله حذف شد`);
+  };
 
   const clearFilters = () => {
-    setFilters({
+    const cleared: TradeJournalFilters = {
       search: '', result: 'all', direction: 'all', strategyId: 'all',
       emotion: 'all', adherenceRating: 'all', dateFrom: '', dateTo: '',
       accountId: 'all', boxId: 'all',
-    });
+    };
+    setFilters(cleared);
     // حذف پارامترهای URL
     setLocation('/journal/trades');
   };
@@ -325,7 +431,8 @@ export default function TradeJournal() {
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">دفتر معاملات</h1>
           <p className="text-muted-foreground mt-1">معاملات خود را ثبت و بررسی کنید.</p>
         </div>
-        <Link href="/journal/trades/new">
+        {/* باگ ۱: ?new=true تضمین می‌کند که همیشه معامله جدید ساخته می‌شود */}
+        <Link href="/journal/trades/new?new=true">
           <Button size="lg" className="gap-2 shadow-lg w-full sm:w-auto">
             <PlusCircle className="h-5 w-5" /> ثبت معامله جدید
           </Button>
@@ -458,13 +565,13 @@ export default function TradeJournal() {
                   <CreditCard className="w-3 h-3" /> حساب معاملاتی
                 </div>
                 <Select value={filters.accountId} onValueChange={v => handleFilterChange('accountId', v)}>
-                  <SelectTrigger className="h-9 bg-background"><SelectValue /></SelectTrigger>
+                  <SelectTrigger dir="rtl" className="h-auto min-h-9 bg-background whitespace-normal [&>span]:!line-clamp-none [&>span]:!whitespace-normal"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">همه حساب‌ها</SelectItem>
                     <SelectItem value="none_set">بدون حساب</SelectItem>
                     {accounts.map(a => (
                       <SelectItem key={a.id} value={a.id}>
-                        <span className="flex items-center gap-2">
+                        <span className="flex min-w-0 items-center gap-2 whitespace-normal break-words text-right" dir="rtl">
                           <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: a.color }} />
                           {a.name}
                         </span>
@@ -527,10 +634,42 @@ export default function TradeJournal() {
         </CollapsibleContent>
       </Collapsible>
 
+      {/* نوار حذف دسته‌جمعی */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center justify-between p-3 bg-destructive/10 border border-destructive/20 rounded-xl animate-in slide-in-from-top-2 duration-200">
+          <span className="text-sm font-medium">{selectedIds.size} معامله انتخاب شده</span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setSelectedIds(new Set())}>لغو</Button>
+            <Button variant="destructive" size="sm" className="gap-1.5" onClick={() => setShowBulkDeleteDialog(true)}>
+              <Trash2 className="w-3.5 h-3.5" /> حذف انتخاب‌شده‌ها
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* تعداد نتایج */}
       <div className="text-sm text-muted-foreground">
         نمایش {trades.length} معامله
+        {selectedIds.size > 0 && <span className="text-destructive font-medium mr-2">({selectedIds.size} انتخاب شده)</span>}
       </div>
+
+      {/* دیالوگ تأیید حذف دسته‌جمعی */}
+      <Dialog open={showBulkDeleteDialog} onOpenChange={setShowBulkDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>حذف {selectedIds.size} معامله؟</DialogTitle>
+            <DialogDescription>
+              این عملیات غیرقابل بازگشت است. {selectedIds.size} معامله به‌طور دائم حذف خواهند شد.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setShowBulkDeleteDialog(false)} disabled={bulkDeleting}>لغو</Button>
+            <Button variant="destructive" onClick={handleBulkDelete} disabled={bulkDeleting}>
+              {bulkDeleting ? 'در حال حذف...' : `حذف ${selectedIds.size} معامله`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* حالت خالی */}
       {trades.length === 0 ? (
@@ -557,7 +696,10 @@ export default function TradeJournal() {
       ) : (
         <TradeListVirtualized
           trades={trades}
-          onSelect={id => setLocation(`/journal/trades/${id}`)}
+          onSelect={id => setLocation(`/journal/trades/${id}?returnTo=${encodeURIComponent(buildTradeJournalPath(filters))}`)}
+          selectedIds={selectedIds}
+          onToggle={handleToggleSelect}
+          onSelectAll={handleSelectAll}
         />
       )}
     </div>
