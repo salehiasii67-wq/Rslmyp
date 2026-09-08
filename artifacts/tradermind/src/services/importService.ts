@@ -6,6 +6,7 @@
 
 import { db, Trade, defaultPostTradeReview } from '../db/database';
 import { tradeService } from './tradeService';
+import { normalizeImportedTradeFields } from '../lib/tradeClassification';
 
 // ─── Column mapping ──────────────────────────────────────────────────────────
 
@@ -183,6 +184,12 @@ function parseTimestamp(val: string): number | null {
   return null;
 }
 
+function parseOptionalNumber(value: string | null | undefined): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 // ─── Validate a mapped record ─────────────────────────────────────────────────
 
 function validateRecord(
@@ -297,21 +304,21 @@ export async function importCSV(
     const openedAt = m.openedAt ? (parseTimestamp(m.openedAt) ?? now) : now;
 
     try {
-      await tradeService.createTrade({
+      const importedTrade: Partial<Trade> = {
         symbol: (m.symbol ?? '').toUpperCase().trim(),
         direction,
         entryPrice,
-        exitPrice: m.exitPrice ? parseFloat(m.exitPrice) || null : null,
-        stopLoss: m.stopLoss ? parseFloat(m.stopLoss) || 0 : 0,
-        takeProfit: m.takeProfit ? parseFloat(m.takeProfit) || null : null,
-        positionSize: m.positionSize ? parseFloat(m.positionSize) || null : null,
-        profitLoss: m.profitLoss ? parseFloat(m.profitLoss) || null : null,
-        rMultiple: m.rMultiple ? parseFloat(m.rMultiple) || null : null,
-        riskPercentage: m.riskPercentage ? parseFloat(m.riskPercentage) || null : null,
-        riskAmount: m.riskAmount ? parseFloat(m.riskAmount) || null : null,
-        fees: m.fees ? parseFloat(m.fees) || null : null,
+        exitPrice: parseOptionalNumber(m.exitPrice),
+        stopLoss: parseOptionalNumber(m.stopLoss) ?? 0,
+        takeProfit: parseOptionalNumber(m.takeProfit),
+        positionSize: parseOptionalNumber(m.positionSize),
+        profitLoss: parseOptionalNumber(m.profitLoss),
+        rMultiple: parseOptionalNumber(m.rMultiple),
+        riskPercentage: parseOptionalNumber(m.riskPercentage),
+        riskAmount: parseOptionalNumber(m.riskAmount),
+        fees: parseOptionalNumber(m.fees),
         result: normaliseResult(m.result ?? '') ?? 'open',
-        status: m.exitPrice ? 'closed' : 'open',
+        status: 'open',
         openedAt,
         closedAt: m.closedAt ? (parseTimestamp(m.closedAt) ?? null) : null,
         market: m.market || null,
@@ -321,6 +328,10 @@ export async function importCSV(
         tradingSession: m.tradingSession || null,
         setupType: m.setupType || null,
         tags: m.tags ? JSON.stringify(m.tags.split(/[,;،]/).map(t => t.trim()).filter(Boolean)) : '[]',
+      };
+      await tradeService.createTrade({
+        ...importedTrade,
+        ...normalizeImportedTradeFields(importedTrade),
       });
       imported++;
     } catch (e) {
@@ -414,20 +425,20 @@ export async function importJSON(
     }
 
     try {
-      await tradeService.createTrade({
+      const importedTrade: Partial<Trade> = {
         symbol,
         direction,
         entryPrice,
-        exitPrice: r.exitPrice != null ? parseFloat(String(r.exitPrice)) || null : null,
-        stopLoss: parseFloat(String(r.stopLoss ?? r.stop_loss ?? 0)) || 0,
-        takeProfit: r.takeProfit != null ? parseFloat(String(r.takeProfit)) || null : null,
-        positionSize: r.positionSize != null ? parseFloat(String(r.positionSize)) || null : null,
-        profitLoss: r.profitLoss != null ? parseFloat(String(r.profitLoss)) || null : null,
-        rMultiple: r.rMultiple != null ? parseFloat(String(r.rMultiple)) || null : null,
-        riskPercentage: r.riskPercentage != null ? parseFloat(String(r.riskPercentage)) || null : null,
-        riskAmount: r.riskAmount != null ? parseFloat(String(r.riskAmount)) || null : null,
+        exitPrice: r.exitPrice != null ? parseOptionalNumber(String(r.exitPrice)) : null,
+        stopLoss: parseOptionalNumber(String(r.stopLoss ?? r.stop_loss ?? '')) ?? 0,
+        takeProfit: r.takeProfit != null ? parseOptionalNumber(String(r.takeProfit)) : null,
+        positionSize: r.positionSize != null ? parseOptionalNumber(String(r.positionSize)) : null,
+        profitLoss: r.profitLoss != null ? parseOptionalNumber(String(r.profitLoss)) : null,
+        rMultiple: r.rMultiple != null ? parseOptionalNumber(String(r.rMultiple)) : null,
+        riskPercentage: r.riskPercentage != null ? parseOptionalNumber(String(r.riskPercentage)) : null,
+        riskAmount: r.riskAmount != null ? parseOptionalNumber(String(r.riskAmount)) : null,
         result: normaliseResult(String(r.result ?? '')) ?? 'open',
-        status: r.status ? String(r.status) as Trade['status'] : (r.exitPrice ? 'closed' : 'open'),
+        status: r.status ? String(r.status) as Trade['status'] : 'open',
         openedAt,
         closedAt: r.closedAt
           ? (typeof r.closedAt === 'number' ? r.closedAt : parseTimestamp(String(r.closedAt)) ?? null)
@@ -440,6 +451,10 @@ export async function importJSON(
         setupType: r.setupType ? String(r.setupType) : null,
         tags: r.tags ? (Array.isArray(r.tags) ? JSON.stringify(r.tags) : String(r.tags)) : '[]',
         emotions: r.emotions ? (Array.isArray(r.emotions) ? JSON.stringify(r.emotions) : String(r.emotions)) : '[]',
+      };
+      await tradeService.createTrade({
+        ...importedTrade,
+        ...normalizeImportedTradeFields(importedTrade),
       });
       imported++;
     } catch (e) {
@@ -453,13 +468,174 @@ export async function importJSON(
 
 // ─── Export trades as CSV ────────────────────────────────────────────────────
 
+// ─── MetaTrader 4/5 HTML Report Parser ───────────────────────────────────────
+
+export interface MT4ParseResult {
+  valid: boolean;
+  recordCount: number;
+  errors: string[];
+  preview: object[];
+  trades: object[];
+}
+
+/**
+ * پارس گزارش HTML تاریخچه حساب از MT4 یا MT5
+ * فرمت: Account History → Save as Report (HTML)
+ */
+export function parseMT4HTMLReport(html: string): MT4ParseResult {
+  const errors: string[] = [];
+
+  // ایجاد DOM مجازی برای پارس HTML
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const tables = Array.from(doc.querySelectorAll('table'));
+  if (!tables.length) {
+    return { valid: false, recordCount: 0, errors: ['جدول داده یافت نشد'], preview: [], trades: [] };
+  }
+
+  // جستجو برای جدولی که حاوی داده معاملات است
+  let dataTable: Element | null = null;
+  let headerRowIndex = -1;
+  let headers: string[] = [];
+
+  for (const table of tables) {
+    const rows = Array.from(table.querySelectorAll('tr'));
+    for (let ri = 0; ri < rows.length; ri++) {
+      const cells = Array.from(rows[ri].querySelectorAll('td,th')).map(c => c.textContent?.trim().toLowerCase() ?? '');
+      // شناسایی هدر جدول MT4/MT5
+      const hasMT4 = cells.some(c => c === 'ticket') && cells.some(c => c.includes('symbol') || c.includes('item'));
+      const hasMT5 = cells.some(c => c === 'position') && cells.some(c => c.includes('symbol'));
+      const hasMT4v2 = cells.some(c => c.includes('open time')) || cells.some(c => c.includes('close time'));
+      if (hasMT4 || hasMT5 || hasMT4v2) {
+        dataTable = table;
+        headerRowIndex = ri;
+        headers = cells;
+        break;
+      }
+    }
+    if (dataTable) break;
+  }
+
+  if (!dataTable || headerRowIndex === -1) {
+    return { valid: false, recordCount: 0, errors: ['هدر جدول MT4/MT5 شناسایی نشد'], preview: [], trades: [] };
+  }
+
+  // نگاشت ستون‌های MT به فیلدهای معامله
+  const findCol = (...names: string[]) => {
+    for (const n of names) {
+      const idx = headers.findIndex(h => h.includes(n));
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const colSymbol   = findCol('symbol', 'item');
+  const colType     = findCol('type', 'direction');
+  const colVolume   = findCol('volume', 'size', 'lots');
+  const colOpenTime = findCol('open time', 'time', 'open');
+  const colOpenPx   = findCol('open price', 'price');
+  const colSL       = findCol('s/l', 'sl', 'stop loss');
+  const colTP       = findCol('t/p', 'tp', 'take profit');
+  const colCloseTime= findCol('close time');
+  const colClosePx  = headers.findLastIndex ? headers.findLastIndex(h => h.includes('price')) : -1;
+  const colProfit   = findCol('profit');
+  const colComm     = findCol('commission', 'comm');
+  const colSwap     = findCol('swap');
+
+  const allRows = Array.from(dataTable.querySelectorAll('tr'));
+  const dataRows = allRows.slice(headerRowIndex + 1);
+
+  const trades: object[] = [];
+
+  for (const row of dataRows) {
+    const cells = Array.from(row.querySelectorAll('td,th')).map(c => c.textContent?.trim() ?? '');
+    if (cells.length < 5) continue;
+
+    const typeRaw = (cells[colType] ?? '').toLowerCase().trim();
+    // رد کردن ردیف‌های خلاصه (balance, credit, subtotal, ...)
+    if (['balance', 'credit', 'subtotal', 'profit', 'deposit', 'withdrawal'].includes(typeRaw)) continue;
+    // رد کردن ردیف‌های کاملاً خالی
+    if (!typeRaw) continue;
+    // فقط معاملات buy/sell (نه باز/بسته جداگانه در MT5)
+    if (!['buy', 'sell', 'buy limit', 'sell limit', 'buy stop', 'sell stop', 'in', 'out'].includes(typeRaw)) continue;
+
+    const direction = typeRaw.startsWith('buy') || typeRaw === 'in' ? 'long' : 'short';
+    const symbol    = cells[colSymbol] ?? '';
+    const openTime  = colOpenTime >= 0 ? cells[colOpenTime] : '';
+    const closeTime = colCloseTime >= 0 ? cells[colCloseTime] : '';
+    const openPx    = parseFloat(cells[colOpenPx] ?? '') || 0;
+    const closePx   = colClosePx >= 0 ? parseFloat(cells[colClosePx] ?? '') : null;
+    const volume    = colVolume >= 0 ? parseFloat(cells[colVolume] ?? '') : null;
+    const sl        = colSL >= 0 ? parseFloat(cells[colSL] ?? '') || null : null;
+    const tp        = colTP >= 0 ? parseFloat(cells[colTP] ?? '') || null : null;
+    const profit    = colProfit >= 0 ? parseFloat(cells[colProfit] ?? '') : null;
+    const comm      = colComm >= 0 ? parseFloat(cells[colComm] ?? '') || 0 : 0;
+    const swap      = colSwap >= 0 ? parseFloat(cells[colSwap] ?? '') || 0 : 0;
+
+    if (!symbol || !openPx) continue;
+
+    // تبدیل تاریخ MT4 (2024.01.15 10:30) به ISO
+    const parseMTDate = (d: string) => {
+      if (!d) return null;
+      const iso = d.replace(/(\d{4})\.(\d{2})\.(\d{2})/, '$1-$2-$3');
+      const t = new Date(iso).getTime();
+      return isNaN(t) ? null : t;
+    };
+
+    const openedAt  = parseMTDate(openTime) ?? Date.now();
+    const closedAt  = parseMTDate(closeTime);
+    const netProfit = profit !== null ? profit + comm + swap : null;
+    const result    = netProfit === null ? 'open'
+      : netProfit > 0 ? 'win'
+      : netProfit < 0 ? 'loss'
+      : 'breakeven';
+
+    const fees = Math.abs(comm) + Math.abs(swap);
+
+    const importedTrade: Partial<Trade> = {
+      symbol,
+      direction,
+      market: 'Forex',
+      status: 'open',
+      result,
+      entryPrice: openPx,
+      exitPrice: closePx ?? null,
+      stopLoss: sl ?? openPx * (direction === 'long' ? 0.99 : 1.01),
+      takeProfit: tp ?? null,
+      positionSize: volume ?? null,
+      profitLoss: netProfit,
+      fees: fees > 0 ? fees : null,
+      openedAt,
+      closedAt: closedAt ?? null,
+      notes: `وارد شده از گزارش MT4/MT5`,
+    };
+    trades.push({
+      ...importedTrade,
+      ...normalizeImportedTradeFields(importedTrade),
+    });
+  }
+
+  if (!trades.length) {
+    errors.push('هیچ ردیف معاملاتی (buy/sell) در فایل یافت نشد');
+    return { valid: false, recordCount: 0, errors, preview: [], trades: [] };
+  }
+
+  return {
+    valid: true,
+    recordCount: trades.length,
+    errors,
+    preview: trades.slice(0, 3),
+    trades,
+  };
+}
+
 export async function exportTradesAsCSV(): Promise<string> {
   const trades = await db.trades.orderBy('openedAt').toArray();
   const headers = [
     'id', 'symbol', 'market', 'direction', 'status', 'result',
     'entryPrice', 'exitPrice', 'stopLoss', 'takeProfit',
     'positionSize', 'riskPercentage', 'riskAmount', 'rMultiple',
-    'profitLoss', 'fees', 'openedAt', 'closedAt',
+    'profitLoss', 'fees', 'commission', 'spread', 'ticketNumber', 'openedAt', 'closedAt',
     'tradingSession', 'setupType', 'entryReason', 'lesson', 'notes', 'tags',
   ];
 
@@ -477,7 +653,8 @@ export async function exportTradesAsCSV(): Promise<string> {
     t.id, t.symbol, t.market ?? '', t.direction, t.status, t.result,
     t.entryPrice, t.exitPrice ?? '', t.stopLoss, t.takeProfit ?? '',
     t.positionSize ?? '', t.riskPercentage ?? '', t.riskAmount ?? '', t.rMultiple ?? '',
-    t.profitLoss ?? '', t.fees ?? '', dateStr(t.openedAt), dateStr(t.closedAt),
+    t.profitLoss ?? '', t.fees ?? '', t.commission ?? '', t.spread ?? '', t.ticketNumber ?? '',
+    dateStr(t.openedAt), dateStr(t.closedAt),
     t.tradingSession ?? '', t.setupType ?? '', t.entryReason ?? '', t.lesson ?? '',
     t.notes ?? '', (() => { try { return JSON.parse(t.tags ?? '[]').join(';'); } catch { return ''; } })(),
   ].map(escapeCSV).join(','));
