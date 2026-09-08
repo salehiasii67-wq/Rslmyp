@@ -6,7 +6,7 @@ import { Badge } from "../components/ui/badge";
 import { Input } from "../components/ui/input";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import {
-  Download, Upload, AlertTriangle, CheckCircle2, Clock,
+  Download, Upload, AlertTriangle, CheckCircle2, Clock, FileText,
   FileArchive, RefreshCcw, Trash2, ChevronDown, ChevronUp,
   ShieldCheck, Layers, XCircle, KeyRound, Eye, EyeOff, Lock, AlertCircle
 } from "lucide-react";
@@ -117,6 +117,7 @@ export default function BackupRestore() {
 
   // ── Excel Export state
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportingWord, setExportingWord] = useState(false);
 
   const handleExcelExport = async () => {
     setExportingExcel(true);
@@ -127,6 +128,18 @@ export default function BackupRestore() {
       toast.error('خطا در ساخت فایل Excel. لطفاً دوباره تلاش کنید.');
     } finally {
       setExportingExcel(false);
+    }
+  };
+
+  const handleWordExport = async () => {
+    setExportingWord(true);
+    try {
+      await backupService.exportToWord();
+      toast.success('گزارش Word با جدول معاملات و تصاویر ساخته شد');
+    } catch {
+      toast.error('خطا در ساخت گزارش Word. لطفاً دوباره تلاش کنید.');
+    } finally {
+      setExportingWord(false);
     }
   };
 
@@ -335,37 +348,54 @@ export default function BackupRestore() {
             <ShieldCheck className="w-3 h-3" />
             فایل پشتیبان فقط در دستگاه شما ذخیره می‌شود. هیچ اطلاعاتی به سرور ارسال نمی‌شود.
           </p>
+           <p className="text-xs text-muted-foreground mt-2 rounded-md border border-primary/20 bg-primary/5 p-3">
+             در اندروید، فایل ابتدا به‌صورت قطعی در مسیر Documents/TraderMind/Backups ذخیره می‌شود و بعد پنجره «ذخیره یا ارسال» باز می‌شود.
+             اگر پنجره را ببندید، فایل همچنان در همان مسیر قابل مشاهده است؛ از برنامه Files وارد Documents و سپس TraderMind و Backups شوید.
+           </p>
         </CardContent>
       </Card>
 
-      {/* ──── خروجی Excel ──── */}
+       {/* ──── خروجی Excel و Word ──── */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Layers className="w-5 h-5 text-emerald-500" />
-            خروجی Excel
+             خروجی Excel و Word
           </CardTitle>
           <CardDescription>
-            فهرست کامل معاملات خود را به فرمت Excel (.xlsx) دانلود کنید — شامل تمام جزئیات، نتایج و یادداشت‌ها.
+             Excel واقعی چندشیتی شامل جزئیات داده‌ها؛ و گزارش Word شامل جدول کامل معاملات و تصاویر هر معامله در صفحات بعدی.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center justify-between p-4 border rounded-lg bg-muted/20">
+           <div className="flex flex-col gap-4 p-4 border rounded-lg bg-muted/20 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="font-medium">دانلود فایل Excel</p>
-              <p className="text-sm text-muted-foreground">مناسب برای آنالیز در Excel یا Google Sheets</p>
+                <p className="font-medium">گزارش‌گیری از معاملات</p>
+                <p className="text-sm text-muted-foreground">هر دو فایل روی همین دستگاه ساخته و دانلود می‌شوند.</p>
             </div>
-            <Button
-              onClick={handleExcelExport}
-              disabled={exportingExcel}
-              variant="outline"
-              className="flex items-center gap-2 shrink-0 border-emerald-500/40 text-emerald-500 hover:bg-emerald-500/10"
-            >
-              {exportingExcel
-                ? <><RefreshCcw className="w-4 h-4 animate-spin" /> در حال ساخت...</>
-                : <><Download className="w-4 h-4" /> دانلود Excel</>
-              }
-            </Button>
+             <div className="flex flex-wrap gap-2 shrink-0">
+               <Button
+                 onClick={handleExcelExport}
+                 disabled={exportingExcel || exportingWord}
+                 variant="outline"
+                 className="flex items-center gap-2 border-emerald-500/40 text-emerald-500 hover:bg-emerald-500/10"
+               >
+                 {exportingExcel
+                   ? <><RefreshCcw className="w-4 h-4 animate-spin" /> در حال ساخت...</>
+                   : <><Download className="w-4 h-4" /> Excel (.xlsx)</>
+                 }
+               </Button>
+               <Button
+                 onClick={handleWordExport}
+                 disabled={exportingExcel || exportingWord}
+                 variant="outline"
+                 className="flex items-center gap-2 border-blue-500/40 text-blue-500 hover:bg-blue-500/10"
+               >
+                 {exportingWord
+                   ? <><RefreshCcw className="w-4 h-4 animate-spin" /> در حال ساخت...</>
+                   : <><FileText className="w-4 h-4" /> Word (.docx)</>
+                 }
+               </Button>
+             </div>
           </div>
         </CardContent>
       </Card>
@@ -378,7 +408,7 @@ export default function BackupRestore() {
             بازیابی اطلاعات
           </CardTitle>
           <CardDescription>
-            اطلاعات را از یک فایل پشتیبان قبلی بازیابی کنید. فرمت‌های پشتیبانی‌شده: ZIP و JSON
+             اطلاعات را از یک فایل پشتیبان قبلی بازیابی کنید. فرمت‌های پشتیبانی‌شده: GZ، ZIP و JSON
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -392,11 +422,11 @@ export default function BackupRestore() {
               <FileArchive className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
               <p className="font-medium mb-1">انتخاب فایل پشتیبان</p>
               <p className="text-sm text-muted-foreground">روی اینجا کلیک کنید یا فایل را بکشید</p>
-              <p className="text-xs text-muted-foreground mt-2">پسوند مجاز: .zip یا .json</p>
+               <p className="text-xs text-muted-foreground mt-2">پسوند مجاز: .gz، .zip یا .json</p>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".zip,.json"
+                 accept=".gz,.tradermind-backup.gz,.zip,.json"
                 onChange={handleFileSelect}
                 className="hidden"
               />
