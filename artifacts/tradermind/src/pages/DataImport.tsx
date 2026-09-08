@@ -25,15 +25,16 @@ import {
   Lightbulb, Tag, Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { exportTradesAsCSV } from "../services/importService";
+import { exportTradesAsCSV, parseMT4HTMLReport } from "../services/importService";
 import { db, Trade } from "../db/database";
 import { TradeScreenshot, LifecyclePosition } from "../types/screenshot";
 import { tradeService } from "../services/tradeService";
+import StoredImage from "../components/StoredImage";
 
 // ─── Wizard steps ──────────────────────────────────────────────────────────────
 
 type Step = 'type' | 'upload' | 'map' | 'preview' | 'duplicates' | 'confirm' | 'done';
-type DataType = 'csv' | 'json' | 'screenshots';
+type DataType = 'csv' | 'json' | 'screenshots' | 'html';
 
 // ── Screenshot import types ──
 interface PendingScreenshot {
@@ -137,6 +138,17 @@ export default function DataImport() {
       setSampleRows(rows);
       setMapping(autoMapColumns(h));
       setStep('map');
+    } else if (dataType === 'html') {
+      // گزارش HTML متاتریدر را مستقیم پارس کن بدون نگاشت
+      const v = parseMT4HTMLReport(text);
+      if (!v.valid) {
+        toast.error('فایل HTML شناسایی نشد. مطمئن شوید گزارش تاریخچه MT4/MT5 است.');
+        return;
+      }
+      setJsonValidation({ valid: true, count: v.recordCount, errors: v.errors, preview: v.preview });
+      setFileText(JSON.stringify(v.trades)); // تبدیل به JSON برای ایمپورت
+      setDataType('json'); // از مسیر JSON استفاده کن
+      setStep('preview');
     } else {
       const v = validateJSONTrades(text);
       setJsonValidation({ valid: v.valid, count: v.recordCount, errors: v.errors, preview: v.preview });
@@ -289,6 +301,7 @@ export default function DataImport() {
               {[
                 { id: 'csv' as DataType, icon: Table, title: 'فایل CSV', desc: 'وارد کردن از فایل گسترده‌نگار (Excel، اپلیکیشن بروکر، Google Sheets)' },
                 { id: 'json' as DataType, icon: FileText, title: 'فایل JSON', desc: 'وارد کردن از فایل JSON ساختاریافته' },
+                { id: 'html' as DataType, icon: FileText, title: 'گزارش HTML متاتریدر', desc: 'وارد کردن گزارش تاریخچه حساب از MT4 / MT5 (فرمت HTML)' },
                 { id: 'screenshots' as DataType, icon: ImageIcon, title: 'اسکرین‌شات‌ها', desc: 'ایمپورت دسته‌جمعی تصاویر و اسکرین‌شات به یک معامله' },
               ].map(opt => (
                 <button key={opt.id} onClick={() => setDataType(opt.id)}
@@ -327,17 +340,25 @@ export default function DataImport() {
         <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">فایل {dataType === 'csv' ? 'CSV' : 'JSON'} را انتخاب کنید</CardTitle>
+              <CardTitle className="text-base">
+                {dataType === 'csv' ? 'فایل CSV را انتخاب کنید' : dataType === 'html' ? 'فایل HTML گزارش متاتریدر را انتخاب کنید' : 'فایل JSON را انتخاب کنید'}
+              </CardTitle>
+              {dataType === 'html' && (
+                <CardDescription>
+                  در MT4/MT5: Account History → راست‌کلیک → Save as Report (HTML)
+                </CardDescription>
+              )}
             </CardHeader>
             <CardContent>
-              <input ref={fileRef} type="file" accept={dataType === 'csv' ? '.csv,.txt' : '.json'}
+              <input ref={fileRef} type="file"
+                accept={dataType === 'csv' ? '.csv,.txt' : dataType === 'html' ? '.html,.htm' : '.json'}
                 onChange={handleFileUpload} className="hidden" />
               <button onClick={() => fileRef.current?.click()}
                 className="w-full border-2 border-dashed rounded-xl p-8 flex flex-col items-center gap-3 text-muted-foreground hover:border-primary hover:text-primary transition-colors">
                 <Upload className="w-10 h-10" />
                 <div className="font-medium">کلیک کنید تا فایل انتخاب شود</div>
                 <div className="text-sm">
-                  {dataType === 'csv' ? '*.csv یا *.txt' : '*.json'}
+                  {dataType === 'csv' ? '*.csv یا *.txt' : dataType === 'html' ? '*.html یا *.htm' : '*.json'}
                 </div>
               </button>
             </CardContent>
@@ -369,7 +390,14 @@ export default function DataImport() {
                 <div className="grid grid-cols-3 gap-2">
                   {pendingScreenshots.map((s, i) => (
                     <div key={i} className="relative group">
-                      <img src={s.dataUrl} alt={s.label} className="w-full aspect-video object-cover rounded-lg border border-border" />
+                      <StoredImage
+                        source={s.dataUrl}
+                        alt={s.label}
+                        enableViewer
+                        showDownload
+                        filename={s.label || 'imported-screenshot'}
+                        className="w-full aspect-video object-cover rounded-lg border border-border"
+                      />
                       <button onClick={() => setPendingScreenshots(prev => prev.filter((_, j) => j !== i))}
                         className="absolute top-1 left-1 w-5 h-5 rounded-full bg-destructive/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                         <Trash2 className="w-3 h-3 text-white" />
@@ -495,7 +523,14 @@ export default function DataImport() {
                 <div className="grid grid-cols-3 gap-2">
                   {pendingScreenshots.map((s, i) => (
                     <div key={i} className="relative group">
-                      <img src={s.dataUrl} alt={s.label} className="w-full aspect-video object-cover rounded-lg border border-border" />
+                      <StoredImage
+                        source={s.dataUrl}
+                        alt={s.label}
+                        enableViewer
+                        showDownload
+                        filename={s.label || 'imported-screenshot'}
+                        className="w-full aspect-video object-cover rounded-lg border border-border"
+                      />
                       <div className="text-[9px] truncate text-muted-foreground mt-0.5">{s.label}</div>
                     </div>
                   ))}
@@ -550,19 +585,19 @@ export default function DataImport() {
                 </div>
               )}
 
-              {/* نگاشت */}
-              <div className="space-y-2">
+              {/* نگاشت — محدود به ارتفاع صفحه با اسکرول */}
+              <div className="space-y-2 max-h-[45vh] overflow-y-auto border rounded-lg p-3 bg-muted/5">
                 {headers.map(col => (
                   <div key={col} className="flex items-center gap-3">
-                    <span className="w-32 sm:w-40 text-sm font-mono bg-muted/20 px-2 py-1 rounded truncate">{col}</span>
-                    <span className="text-muted-foreground">→</span>
+                    <span className="w-32 sm:w-40 text-sm font-mono bg-muted/20 px-2 py-1 rounded truncate shrink-0">{col}</span>
+                    <span className="text-muted-foreground shrink-0">→</span>
                     <Select
                       value={mapping[col] ?? 'ignore'}
                       onValueChange={(v) => setMapping(prev => ({ ...prev, [col]: v as ImportFieldKey }))}>
-                      <SelectTrigger className="flex-1 h-8 text-sm">
+                      <SelectTrigger className="flex-1 h-8 text-sm min-w-0">
                         <SelectValue />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent position="popper" className="max-h-[280px] overflow-y-auto">
                         {IMPORT_FIELDS.map(f => (
                           <SelectItem key={f.key} value={f.key}>{f.label}</SelectItem>
                         ))}
