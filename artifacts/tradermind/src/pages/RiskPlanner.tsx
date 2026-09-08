@@ -84,6 +84,7 @@ export default function RiskPlanner() {
     riskPct: riskPct ? parseFloat(riskPct) : null,
     riskAmount: riskAmt ? parseFloat(riskAmt) : null,
     positionSize: null,
+    direction,
   });
 
   const hasResult = calc.missingFields.length === 0 || (calc.slDistance !== null);
