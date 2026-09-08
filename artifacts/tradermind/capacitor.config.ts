@@ -1,16 +1,25 @@
-import { CapacitorConfig } from '@capacitor/cli';
+import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'io.tradermind.app',
-  appName: 'TraderMind',
-  webDir: 'dist/public',
+  appId: 'app.tradermind.os',
+  appName: 'TraderMind OS',
+  webDir: 'dist/capacitor',
   server: {
     androidScheme: 'https',
+    cleartext: false,
   },
   android: {
+    buildOptions: {
+      releaseType: 'APK',
+    },
     allowMixedContent: false,
-    captureInput: true,
+    captureInput: false,
     webContentsDebuggingEnabled: false,
+  },
+  plugins: {
+    SplashScreen: {
+      launchShowDuration: 0,
+    },
   },
 };
 
