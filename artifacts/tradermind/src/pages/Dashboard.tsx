@@ -1,280 +1,4 @@
-import { useEffect, useState, useMemo, useCallback, useRef } from "react";
-import { Link, useLocation } from "wouter";
-import { Skeleton } from "../components/ui/skeleton";
-import { Trade, DailyJournal, Strategy, AnalysisSession, Phase, Step } from "../db/database";
-import { strategyService } from "../services/strategyService";
-import { analysisService } from "../services/analysisService";
-import { tradeService } from "../services/tradeService";
-import { journalService } from "../services/journalService";
-import { backupService } from "../services/backupService";
-import { accountService } from "../services/accountService";
-import { tradingBoxService } from "../services/tradingBoxService";
-import { Account, TradingBox } from "../db/database";
-import { db } from "../db/database";
-import {
-  computeAnalytics, filterTradesByRange, getDateRange,
-  InsightCard, PnlPoint,
-} from "../services/analyticsService";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/card";
-import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
-import { toast } from "sonner";
-import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  BarChart, Bar, Cell, CartesianGrid,
-} from "recharts";
-import {
-  ActivitySquare, PenLine, ChevronLeft, TrendingUp, TrendingDown,
-  BarChart3, Plus, Clock, CheckCircle2, Zap, BookOpen, FileArchive,
-  Lightbulb, Target, LayoutDashboard, AlertCircle, ArrowUpRight,
-  Minus, Shield, CreditCard, Box,
-} from "lucide-react";
-import { formatDateFa } from "../lib/i18n";
-import { getByDay, getBySession } from "../services/performanceService";
-
-// ══════════════════════════════════════════════════════════════════
-// ثوابت و نوع‌ها
-// ══════════════════════════════════════════════════════════════════
-
-type RangeKey = "today" | "week" | "month" | "custom";
-
-const RANGE_LABELS: Record<RangeKey, string> = {
-  today: "امروز",
-  week: "این هفته",
-  month: "این ماه",
-  custom: "بازه دلخواه",
-};
-
-// اطلاعات پیشرفت هر Session نیمه‌کاره
-interface SessionProgress {
-  phaseName: string;
-  phaseIndex: number;   // از ۱
-  totalPhases: number;
-  answeredSteps: number;
-  totalSteps: number;
-  progressPct: number;  // ۰–۱۰۰
-}
-
-const RESULT_FA: Record<string, string> = {
-  win: "سود", loss: "ضرر", breakeven: "سر به سر",
-  "partial-win": "سود جزئی", "partial-loss": "ضرر جزئی", open: "باز", cancelled: "لغو",
-};
-const RESULT_CLS: Record<string, string> = {
-  win: "text-emerald-500", "partial-win": "text-teal-500",
-  loss: "text-rose-500", "partial-loss": "text-amber-500",
-  open: "text-blue-500",
-};
-const RESULT_BG: Record<string, string> = {
-  win: "bg-emerald-500/15", "partial-win": "bg-teal-500/15",
-  loss: "bg-rose-500/15", "partial-loss": "bg-amber-500/15",
-  open: "bg-blue-500/15",
-};
-
-const MOOD_EMOJI: Record<number, string> = {
-  1: "😞", 2: "😕", 3: "😐", 4: "🙂", 5: "😄",
-};
-
-// ── ساعت سلام
-function getGreeting(): string {
-  const h = new Date().getHours();
-  if (h >= 5  && h < 12) return "صبح بخیر";
-  if (h >= 12 && h < 17) return "ظهر بخیر";
-  if (h >= 17 && h < 21) return "عصر بخیر";
-  return "شب بخیر";
-}
-
-function getGreetingSub(): string {
-  const h = new Date().getHours();
-  if (h >= 5  && h < 12) return "روز خوبی برای تحلیل دقیق داشته باشی.";
-  if (h >= 12 && h < 17) return "آماده‌ای برای ثبت تحلیل‌های بعدازظهر؟";
-  if (h >= 17 && h < 21) return "وقت خوبی است ژورنال امروز را کامل کنی.";
-  return "اگر معامله‌ای باز داری، حتماً مرور کن.";
-}
-
-function todayStr(): string {
-  return new Date().toISOString().split("T")[0];
-}
-
-function moodLabel(v: number): string {
-  const labels: Record<number, string> = {
-    1: "خیلی بد", 2: "بد", 3: "متوسط", 4: "خوب", 5: "عالی",
-  };
-  return labels[Math.round(v)] ?? String(v);
-}
-
-// ══════════════════════════════════════════════════════════════════
-// بارگذاری داده‌های داشبورد
-// ══════════════════════════════════════════════════════════════════
-
-interface DashboardData {
-  trades: Trade[];
-  sessions: AnalysisSession[];
-  journals: DailyJournal[];
-  strategies: Strategy[];
-  todayJournal: DailyJournal | undefined;
-  sessionProgress: Map<string, SessionProgress>;
-}
-
-async function loadDashboardData(): Promise<DashboardData> {
-  const [trades, sessions, journals, strategies, todayJournal] = await Promise.all([
-    tradeService.getAllTrades(),
-    analysisService.getAllSessions(),
-    journalService.getAllJournals(),
-    strategyService.getAllStrategies(),
-    journalService.getJournalByDate(todayStr()),
-  ]);
-
-  // بارگذاری اطلاعات پیشرفت برای Session‌های نیمه‌کاره
-  const inProgress = sessions.filter(s => s.status === "in-progress");
-  const sessionProgress = new Map<string, SessionProgress>();
-
-  await Promise.all(inProgress.map(async session => {
-    try {
-      if (!session.strategyId) throw new Error('no strategyId');
-      const phases: Phase[] = await strategyService.getPhasesByStrategyId(session.strategyId);
-      const stepsPerPhase = await Promise.all(phases.map(p => strategyService.getStepsByPhaseId(p.id)));
-      const allSteps: Step[] = stepsPerPhase.flat();
-      const totalSteps = allSteps.length;
-      const answered = totalSteps > 0
-        ? Object.keys(JSON.parse(session.stepResults || "{}")||{}).length
-        : 0;
-      const phaseIdx = phases.findIndex(p => p.id === session.currentPhaseId);
-      const currentPhase = phaseIdx >= 0 ? phases[phaseIdx] : (phases[0] ?? null);
-      sessionProgress.set(session.id, {
-        phaseName: currentPhase?.name ?? "مرحله اول",
-        phaseIndex: phaseIdx >= 0 ? phaseIdx + 1 : 1,
-        totalPhases: phases.length || 1,
-        answeredSteps: answered,
-        totalSteps: totalSteps || 1,
-        progressPct: totalSteps > 0 ? Math.round((answered / totalSteps) * 100) : 0,
-      });
-    } catch {
-      sessionProgress.set(session.id, {
-        phaseName: "—", phaseIndex: 1, totalPhases: 1,
-        answeredSteps: 0, totalSteps: 1, progressPct: 0,
-      });
-    }
-  }));
-
-  return { trades, sessions, journals, strategies, todayJournal, sessionProgress };
-}
-
-// ══════════════════════════════════════════════════════════════════
-// کامپوننت اصلی
-// ══════════════════════════════════════════════════════════════════
-
-export default function Dashboard() {
-  const [, setLocation] = useLocation();
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [rangeKey, setRangeKey] = useState<RangeKey>("week");
-  const [customFrom, setCustomFrom] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 30);
-    return d.toISOString().split("T")[0];
-  });
-  const [customTo, setCustomTo] = useState<string>(() => new Date().toISOString().split("T")[0]);
-  const [exportingBackup, setExportingBackup] = useState(false);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [tradingBoxes, setTradingBoxes] = useState<TradingBox[]>([]);
-  const customFromRef = useRef<HTMLInputElement>(null);
-
-  const reload = useCallback(() => {
-    loadDashboardData().then(setData).finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => { reload(); }, [reload]);
-  useEffect(() => {
-    accountService.getAll().then(setAccounts);
-    tradingBoxService.getAll().then(setTradingBoxes);
-  }, []);
-
-  // ── Derived: معاملات بازه زمانی انتخابی
-  const rangedTrades = useMemo(() => {
-    if (!data) return [];
-    if (rangeKey === "custom") {
-      const from = new Date(customFrom + "T00:00:00").getTime();
-      const to   = new Date(customTo   + "T23:59:59").getTime();
-      return filterTradesByRange(data.trades, from, to);
-    }
-    const { from, to } = getDateRange(rangeKey);
-    return filterTradesByRange(data.trades, from, to);
-  }, [data, rangeKey, customFrom, customTo]);
-
-  // ── Stats بازه انتخابی
-  const rangedStats = useMemo(() => {
-    const closed = rangedTrades.filter(t => t.status === "closed");
-    const wins = closed.filter(t => t.result === "win" || t.result === "partial-win");
-    const withR = closed.filter(t => t.rMultiple != null);
-    const totalPnl = closed.reduce((s, t) => s + (t.profitLoss || 0), 0);
-    return {
-      total: rangedTrades.length,
-      winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
-      avgR: withR.length > 0 ? withR.reduce((s, t) => s + (t.rMultiple || 0), 0) / withR.length : null,
-      totalPnl,
-      closedCount: closed.length,
-    };
-  }, [rangedTrades]);
-
-  // ── آخرین ۵ معامله
-  const recentTrades = useMemo(() => (data?.trades ?? []).slice(0, 5), [data]);
-
-  // ── آخرین ۳ ژورنال (بدون امروز در صورت وجود)
-  const recentJournals = useMemo(() => (data?.journals ?? []).slice(0, 3), [data]);
-
-  // ── تحلیل‌های نیمه‌کاره
-  const inProgressSessions = useMemo(
-    () => (data?.sessions ?? []).filter(s => s.status === "in-progress"),
-    [data],
-  );
-
-  // ── Equity curve (۲۰ معامله آخر بسته)
-  const equityCurve = useMemo((): PnlPoint[] => {
-    if (!data) return [];
-    const closed = [...data.trades.filter(t => t.status === "closed")]
-      .sort((a, b) => (a.closedAt || a.openedAt) - (b.closedAt || b.openedAt))
-      .slice(-20);
-    let cum = 0;
-    return closed.map((t, i) => {
-      cum += t.profitLoss || 0;
-      return { index: i + 1, symbol: t.symbol, pnl: +(t.profitLoss || 0).toFixed(2), cumulative: +cum.toFixed(2) };
-    });
-  }, [data]);
-
-  // ── Insights (فقط اگه داده کافی باشه)
-  const insights = useMemo((): InsightCard[] => {
-    if (!data || data.trades.length < 5) return [];
-    const analytics = computeAnalytics(data.trades, data.journals, data.strategies);
-    return analytics.insights.filter(i => i.type !== "neutral" || data.trades.length >= 10).slice(0, 3);
-  }, [data]);
-
-  // ── آخرین استراتژی استفاده‌شده
-  const lastUsedStrategy = useMemo(() => {
-    if (!data || data.sessions.length === 0) return null;
-    const lastSession = data.sessions[0]; // sessions are sorted by startedAt desc
-    const strat = data.strategies.find(s => s.id === lastSession.strategyId);
-    if (!strat) return null;
-    const count = data.sessions.filter(s => s.strategyId === strat.id).length;
-    return { strategy: strat, count, lastSession };
-  }, [data]);
-
-  // ── پایبندی این هفته
-  const weekAdherence = useMemo(() => {
-    if (!data) return null;
-    const { from, to } = getDateRange("week");
-    const weekTrades = filterTradesByRange(data.trades, from, to)
-      .filter(t => t.adherenceScore != null);
-    if (weekTrades.length < 2) return null;
-    const avg = weekTrades.reduce((s, t) => s + (t.adherenceScore || 0), 0) / weekTrades.length;
-    return Math.round(avg);
-  }, [data]);
-
-  // ── Map استراتژی‌ها
-  const stratMap = useMemo(
-    () => new Map(data?.strategies.map(s => [s.id, s.name]) ?? []),
-    [data],
-  );
-
-  // ── مقایسه با دوره قبلی (برای نشانگرهای delta)
+ مقایسه با دوره قبلی (برای نشانگرهای delta)
   const prevRangedStats = useMemo(() => {
     if (!data || rangeKey === "custom") return null;
     const { from, to } = getDateRange(rangeKey as Exclude<RangeKey, "custom">);
@@ -333,7 +57,7 @@ export default function Dashboard() {
     // ماهانه P/L
     const monthMap = new Map<string, number>();
     allClosed.forEach(t => {
-      const key = new Date(t.closedAt ?? t.openedAt).toISOString().slice(0, 7);
+      const key = getTradingMonthKey(t.closedAt ?? t.openedAt);
       monthMap.set(key, (monthMap.get(key) ?? 0) + (t.profitLoss ?? 0));
     });
     const FA_MONTHS = ["ژانویه","فوریه","مارس","آوریل","مه","ژوئن","ژوئیه","آگوست","سپتامبر","اکتبر","نوامبر","دسامبر"];
@@ -382,7 +106,7 @@ export default function Dashboard() {
       .slice(0, 7);
 
     return { monthlyPnl, dayData, sessionData, strategyData };
-  }, [data]);
+  }, [data, tradingTimeMode, brokerUtcOffsetMinutes]);
 
   // ── وضعیت: کاربر جدید؟
   const isNewUser = data && data.strategies.length === 0 && data.trades.length === 0 && data.journals.length === 0;
@@ -431,22 +155,35 @@ export default function Dashboard() {
     );
   }
 
+  if (error || !data) {
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-4 text-center" dir="rtl">
+        <AlertCircle className="h-10 w-10 text-destructive" />
+        <p className="text-muted-foreground">{error || "اطلاعات داشبورد در دسترس نیست."}</p>
+        <Button variant="outline" onClick={reload}>تلاش مجدد</Button>
+      </div>
+    );
+  }
+
   // ══════════════════════════════════════════════
   // کاربر جدید — Empty State
   // ══════════════════════════════════════════════
   if (isNewUser) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[70vh] text-center gap-6 px-4" dir="rtl">
-        <div className="w-20 h-20 rounded-3xl bg-primary/10 flex items-center justify-center">
-          <Target className="w-10 h-10 text-primary" />
+      <div className="hero-empty-state relative overflow-hidden flex flex-col items-center justify-center min-h-[70vh] text-center gap-6 px-4 rounded-[2rem] border border-primary/10" dir="rtl">
+        <div className="absolute -top-24 -left-20 h-72 w-72 rounded-full bg-primary/10 blur-3xl pointer-events-none" />
+        <div className="absolute -bottom-32 -right-20 h-80 w-80 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
+        <div className="relative w-20 h-20 rounded-[1.6rem] bg-gradient-to-br from-primary to-indigo-400 flex items-center justify-center shadow-xl shadow-primary/25">
+          <Target className="w-10 h-10 text-primary-foreground" />
         </div>
-        <div>
-          <h1 className="text-2xl font-bold mb-2">به TraderMind خوش آمدی</h1>
-          <p className="text-muted-foreground max-w-sm">
+        <div className="relative">
+          <p className="text-xs font-semibold tracking-[0.22em] text-primary mb-3">TRADERMIND OS</p>
+          <h1 className="text-2xl sm:text-3xl font-bold mb-2">به TraderMind خوش آمدی</h1>
+          <p className="text-muted-foreground max-w-md leading-7">
             اولین استراتژی‌ات را ایجاد کن تا مسیر تحلیل و ژورنال‌نویسی حرفه‌ای را شروع کنیم.
           </p>
         </div>
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex flex-col sm:flex-row gap-3">
           <Link href="/strategies/new">
             <Button size="lg" className="gap-2">
               <Plus className="w-5 h-5" /> ایجاد اولین استراتژی
@@ -458,13 +195,13 @@ export default function Dashboard() {
             </Button>
           </Link>
         </div>
-        <div className="grid grid-cols-3 gap-4 mt-4 text-sm text-muted-foreground max-w-sm w-full">
+        <div className="relative grid grid-cols-3 gap-3 mt-4 text-sm text-muted-foreground max-w-md w-full">
           {[
             { icon: Target, text: "استراتژی بساز" },
             { icon: ActivitySquare, text: "تحلیل کن" },
             { icon: BarChart3, text: "رشد کن" },
           ].map(({ icon: Icon, text }) => (
-            <div key={text} className="flex flex-col items-center gap-2 p-3 rounded-xl border border-dashed">
+            <div key={text} className="flex flex-col items-center gap-2 p-4 rounded-2xl border border-primary/15 bg-background/40 backdrop-blur-sm">
               <Icon className="w-5 h-5 opacity-50" />
               <span>{text}</span>
             </div>
@@ -688,30 +425,38 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard
-                label="تعداد معاملات"
-                value={rangedStats.total.toLocaleString("fa-IR")}
-                sub={`${rangedStats.closedCount.toLocaleString("fa-IR")} بسته`}
-              />
-              <StatCard
-                label="درصد برد"
-                value={`${rangedStats.winRate.toFixed(1)}٪`}
-                valueClass={rangedStats.winRate >= 50 ? "text-emerald-500" : "text-rose-500"}
-              />
-              <StatCard
-                label="سود / ضرر"
-                value={`${rangedStats.totalPnl >= 0 ? "+" : ""}$${rangedStats.totalPnl.toFixed(2)}`}
-                valueClass={rangedStats.totalPnl >= 0 ? "text-emerald-500" : "text-rose-500"}
-              />
-              <StatCard
-                label="میانگین R"
-                value={rangedStats.avgR != null ? `${rangedStats.avgR.toFixed(2)}R` : "—"}
-                valueClass={
-                  rangedStats.avgR == null ? undefined
-                  : rangedStats.avgR >= 0 ? "text-emerald-500"
-                  : "text-rose-500"
-                }
-              />
+              {dashShowTrades && (
+                <StatCard
+                  label="تعداد معاملات"
+                  value={rangedStats.total.toLocaleString("fa-IR")}
+                  sub={`${rangedStats.closedCount.toLocaleString("fa-IR")} بسته`}
+                />
+              )}
+              {dashShowWinRate && (
+                <StatCard
+                  label="درصد برد"
+                  value={`${rangedStats.winRate.toFixed(1)}٪`}
+                  valueClass={rangedStats.winRate >= 50 ? "text-emerald-500" : "text-rose-500"}
+                />
+              )}
+              {dashShowPnl && (
+                <StatCard
+                  label="سود / ضرر"
+                  value={`${rangedStats.totalPnl >= 0 ? "+" : ""}$${rangedStats.totalPnl.toFixed(2)}`}
+                  valueClass={rangedStats.totalPnl >= 0 ? "text-emerald-500" : "text-rose-500"}
+                />
+              )}
+              {dashShowAvgR && (
+                <StatCard
+                  label="میانگین R"
+                  value={rangedStats.avgR != null ? `${rangedStats.avgR.toFixed(2)}R` : "—"}
+                  valueClass={
+                    rangedStats.avgR == null ? undefined
+                    : rangedStats.avgR >= 0 ? "text-emerald-500"
+                    : "text-rose-500"
+                  }
+                />
+              )}
             </div>
           )}
         </CardContent>
@@ -799,8 +544,8 @@ export default function Dashboard() {
                       <CreditCard className="w-4 h-4" style={{ color: acc.color }} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-sm truncate">{acc.name}</p>
-                      <p className="text-xs text-muted-foreground">{acc.broker || 'بدون بروکر'} · {accTrades.length} معامله</p>
+                      <p className="font-semibold text-sm whitespace-normal break-words leading-5" dir="rtl">{acc.name}</p>
+                      <p className="text-xs text-muted-foreground whitespace-normal break-words leading-5" dir="rtl">{acc.broker || 'بدون بروکر'} · {accTrades.length} معامله</p>
                     </div>
                     <div className="text-right shrink-0">
                       <p className={`text-sm font-bold ${pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
@@ -873,7 +618,7 @@ export default function Dashboard() {
       <div className="grid gap-4 lg:grid-cols-2">
 
         {/* آخرین معاملات */}
-        <Card className="flex flex-col">
+        {dashShowRecentTrades && <Card className="flex flex-col">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base flex items-center gap-2">
@@ -921,10 +666,10 @@ export default function Dashboard() {
               </div>
             )}
           </CardContent>
-        </Card>
+        </Card>}
 
         {/* آخرین ژورنال‌ها */}
-        <Card className="flex flex-col">
+        {dashShowLastJournal && <Card className="flex flex-col">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base flex items-center gap-2">
@@ -963,7 +708,7 @@ export default function Dashboard() {
               </div>
             )}
           </CardContent>
-        </Card>
+        </Card>}
       </div>
 
       {/* ━━━━━━━━━━━━━━━━ 6. آخرین استراتژی + پایبندی ━━━━━━━━━━━━━━━━ */}
@@ -995,7 +740,7 @@ export default function Dashboard() {
         )}
 
         {/* پایبندی به استراتژی */}
-        <Card>
+        {dashShowAdherence && <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <Shield className="w-4 h-4 text-primary" /> پایبندی به قوانین استراتژی
@@ -1027,7 +772,7 @@ export default function Dashboard() {
               </div>
             )}
           </CardContent>
-        </Card>
+        </Card>}
       </div>
 
       {/* ━━━━━━━━━━━━━━━━ 7. نمودارهای تحلیلی ━━━━━━━━━━━━━━━━ */}
