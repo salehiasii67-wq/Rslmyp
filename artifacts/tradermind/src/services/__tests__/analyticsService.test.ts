@@ -115,6 +115,15 @@ describe('computeAnalytics — TradeSummary', () => {
     const result = computeAnalytics(trades, [], []);
     expect(result.summary.winRate).toBe(50);
   });
+
+  it('باید هزینه را از P/L ناخالص کم کند', () => {
+    const result = computeAnalytics([
+      makeTrade({ profitLoss: 100, fees: 10 }),
+    ], [], []);
+
+    expect(result.summary.totalPnl).toBe(90);
+    expect(result.pnlCurve[0].pnl).toBe(90);
+  });
 });
 
 describe('computeAnalytics — StrategyPerf', () => {
