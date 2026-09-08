@@ -1,4 +1,24 @@
-nition {
+import Dexie, { Table } from 'dexie';
+
+// ── کمک: تبدیل Base64 dataUrl به Blob ──────────────────────────────────────
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const [header, base64] = dataUrl.split(',');
+  const mimeMatch = header.match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/webp';
+  const binary = atob(base64);
+  const buffer = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) buffer[i] = binary.charCodeAt(i);
+  return new Blob([buffer], { type: mime });
+}
+
+/** بازسازی dataUrl از Blob برای نمایش در <img src="..."> */
+export function blobToObjectUrl(blob: Blob): string {
+  return URL.createObjectURL(blob);
+}
+
+export type StrategyMode = 'standard' | 'major-trading' | 'session-trading';
+
+export interface StrategySetupDefinition {
   id: string;
   name: string;
   trigger: string;
