@@ -1,4 +1,287 @@
-ansparent rounded-full animate-spin" />
+/**
+ * PostTradeReview — مرور ساختاریافته پس از معامله
+ * ۱۰ بخش: خلاصه | انتظار vs واقعیت | تحلیل | اجرا | ریسک | رفتار بازار | کیفیت | احساسات | تأمل | تحلیل AI
+ */
+import { useState, useEffect } from 'react';
+import { useParams, useLocation } from 'wouter';
+import { tradeService } from '../services/tradeService';
+import { analysisService } from '../services/analysisService';
+import { Trade, AnalysisSession, PostTradeReviewData, defaultPostTradeReview, BehaviorFlag } from '../db/database';
+import { Button } from '../components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Badge } from '../components/ui/badge';
+import { Textarea } from '../components/ui/textarea';
+import { Progress } from '../components/ui/progress';
+import { toast } from 'sonner';
+import { cn } from '../lib/utils';
+import {
+  ArrowRight, ArrowLeft, CheckCircle2, AlertCircle, Brain,
+  BarChart2, Target, Shield, TrendingUp, TrendingDown, Minus,
+  Lightbulb, BookOpen, Clock, RotateCcw, Save, ChevronDown, ChevronUp,
+  Camera, Activity, History, Zap, Eye,
+} from 'lucide-react';
+import { format } from 'date-fns';
+import { db } from '../db/database';
+import ScreenshotManager from '../components/ScreenshotManager';
+import { TradeScreenshot } from '../types/screenshot';
+import { compareLifecycleScreenshots } from '../services/visualAnalysisService';
+import { parseLiveMonitoring } from '../services/liveTradeService';
+import {
+  LIVE_STATE_LABELS, EVENT_LABELS, EVENT_ICONS, SCENARIO_TYPE_LABELS, SCENARIO_STATUS_LABELS,
+  LiveMonitoringData, LIVE_STATE_COLORS,
+} from '../types/liveTrade';
+
+// ── Constants ───────────────────────────────────────────────────────
+
+const RESULT_FA: Record<string, string> = {
+  win: 'سود', loss: 'ضرر', breakeven: 'سر به سر',
+  'partial-win': 'سود جزئی', 'partial-loss': 'ضرر جزئی',
+  open: 'باز', cancelled: 'لغو',
+};
+const RESULT_COLORS: Record<string, string> = {
+  win: 'text-emerald-500', loss: 'text-rose-500', breakeven: 'text-slate-400',
+  'partial-win': 'text-teal-500', 'partial-loss': 'text-amber-500',
+  open: 'text-blue-500', cancelled: 'text-muted-foreground',
+};
+
+const STEPS = [
+  { id: 'summary',    icon: BarChart2,    label: 'خلاصه معامله' },
+  { id: 'expectation', icon: Target,      label: 'انتظار vs واقعیت' },
+  { id: 'analysis',  icon: Brain,        label: 'تحلیل بازار' },
+  { id: 'execution', icon: TrendingUp,   label: 'اجرا' },
+  { id: 'risk',      icon: Shield,       label: 'مدیریت ریسک' },
+  { id: 'market',    icon: BarChart2,    label: 'رفتار بازار' },
+  { id: 'quality',   icon: CheckCircle2, label: 'کیفیت معامله' },
+  { id: 'behavior',  icon: Lightbulb,    label: 'رفتار و احساسات' },
+  { id: 'reflection', icon: BookOpen,    label: 'تأمل شخصی' },
+  { id: 'ai',        icon: Brain,        label: 'تحلیل هوشمند' },
+];
+
+const BEHAVIOR_FLAGS: { id: BehaviorFlag; label: string; color: string }[] = [
+  { id: 'hesitation',       label: 'تردید',            color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' },
+  { id: 'fear',             label: 'ترس',              color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' },
+  { id: 'fomo',             label: 'FOMO',             color: 'bg-rose-500/20 text-rose-400 border-rose-500/30' },
+  { id: 'impatience',       label: 'بی‌صبری',          color: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' },
+  { id: 'overconfidence',   label: 'اعتماد کاذب',      color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' },
+  { id: 'revenge-trading',  label: 'معامله انتقامی',   color: 'bg-red-600/20 text-red-400 border-red-600/30' },
+  { id: 'uncertainty',      label: 'عدم اطمینان',      color: 'bg-slate-500/20 text-slate-400 border-slate-500/30' },
+];
+
+// ── TriToggle ────────────────────────────────────────────────────────
+
+function TriToggle({
+  value, onChange, labels = ['بله', 'نه', '؟'],
+}: { value: boolean | null; onChange: (v: boolean | null) => void; labels?: [string, string, string] }) {
+  return (
+    <div className="flex gap-1">
+      {[true, false, null].map((v, i) => (
+        <button
+          key={i}
+          type="button"
+          onClick={() => onChange(v === value ? null : v)}
+          className={cn(
+            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+            value === v
+              ? v === true
+                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                : v === false
+                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                  : 'bg-muted text-muted-foreground border-border'
+              : 'bg-transparent border-border text-muted-foreground hover:bg-muted/50',
+          )}
+        >
+          {labels[i]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── QualitySlider ─────────────────────────────────────────────────────
+
+function QualitySlider({
+  value, onChange, label,
+}: { value: number | null; onChange: (v: number) => void; label: string }) {
+  const colors = ['', 'bg-rose-500', 'bg-orange-500', 'bg-amber-500', 'bg-teal-500', 'bg-emerald-500'];
+  const textColors = ['', 'text-rose-400', 'text-orange-400', 'text-amber-400', 'text-teal-400', 'text-emerald-400'];
+  const labels = ['', 'خیلی بد', 'ضعیف', 'متوسط', 'خوب', 'عالی'];
+  return (
+    <div className="space-y-2">
+      <div className="flex justify-between items-center">
+        <span className="text-sm text-muted-foreground">{label}</span>
+        {value !== null && (
+          <span className={cn('text-sm font-bold', textColors[value])}>{value}/5 — {labels[value]}</span>
+        )}
+      </div>
+      <div className="flex gap-1.5">
+        {[1, 2, 3, 4, 5].map(n => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={cn(
+              'flex-1 h-8 rounded-md border text-xs font-bold transition-all',
+              value === n
+                ? cn(colors[n], 'text-white border-transparent')
+                : 'border-border text-muted-foreground hover:bg-muted/50',
+            )}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── OptionGroup ───────────────────────────────────────────────────────
+
+function OptionGroup<T extends string>({
+  value, onChange, options,
+}: { value: T | null; onChange: (v: T | null) => void; options: { value: T; label: string; color?: string }[] }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map(o => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(value === o.value ? null : o.value)}
+          className={cn(
+            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+            value === o.value
+              ? o.color || 'bg-primary/20 text-primary border-primary/40'
+              : 'bg-transparent border-border text-muted-foreground hover:bg-muted/50',
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── TradeTimeline ─────────────────────────────────────────────────────
+
+function TradeTimeline({ trade, review, hasSession }: {
+  trade: Trade; review: PostTradeReviewData; hasSession: boolean;
+}) {
+  const events = [
+    { label: 'پلن پیش از معامله', icon: '📋', done: hasSession, time: trade.openedAt ? format(new Date(trade.openedAt), 'MM/dd') : null },
+    { label: 'اجرای معامله', icon: '⚡', done: true, time: trade.openedAt ? format(new Date(trade.openedAt), 'HH:mm') : null },
+    { label: 'بازار در حال حرکت', icon: '📈', done: trade.status === 'closed', time: null },
+    { label: 'بسته شدن معامله', icon: '🔒', done: trade.status === 'closed', time: trade.closedAt ? format(new Date(trade.closedAt), 'MM/dd HH:mm') : null },
+    { label: 'مرور پس از معامله', icon: '🔍', done: review.completedAt > 0, time: review.completedAt > 0 ? format(new Date(review.completedAt), 'MM/dd') : null },
+    { label: 'تحلیل هوشمند', icon: '🧠', done: review.aiAnalysis !== null, time: null },
+    { label: 'آپدیت دانش', icon: '📚', done: review.aiAnalysis !== null, time: null },
+  ];
+  return (
+    <div className="space-y-1">
+      {events.map((e, i) => (
+        <div key={i} className="flex items-center gap-3">
+          <div className={cn('w-7 h-7 rounded-full flex items-center justify-center text-sm shrink-0 border', e.done ? 'bg-primary/20 border-primary/40' : 'bg-muted border-border')}>
+            {e.icon}
+          </div>
+          <div className="flex-1">
+            <span className={cn('text-xs', e.done ? 'text-foreground' : 'text-muted-foreground')}>{e.label}</span>
+          </div>
+          {e.time && <span className="text-xs text-muted-foreground">{e.time}</span>}
+          {e.done && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
+          {!e.done && i > 0 && <div className="w-3.5 h-3.5 rounded-full border border-border shrink-0" />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Main Component ────────────────────────────────────────────────────
+
+export default function PostTradeReview() {
+  const { id } = useParams<{ id: string }>();
+  const [, setLocation] = useLocation();
+  const [trade, setTrade] = useState<Trade | null>(null);
+  const [session, setSession] = useState<AnalysisSession | null>(null);
+  const [review, setReview] = useState<PostTradeReviewData>({ ...defaultPostTradeReview });
+  const [currentStep, setCurrentStep] = useState(0);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [showCorrection, setShowCorrection] = useState<string | null>(null);
+  const [correctionText, setCorrectionText] = useState('');
+  const [allTrades, setAllTrades] = useState<import('../db/database').Trade[]>([]);
+  const [showVisualLearning, setShowVisualLearning] = useState(false);
+  const [showLiveMonitoringCard, setShowLiveMonitoringCard] = useState(false);
+
+  useEffect(() => { load(); }, [id]);
+  useEffect(() => { db.trades.toArray().then(setAllTrades); }, []);
+
+  const load = async () => {
+    if (!id) return;
+    const tr = await tradeService.getTradeById(id);
+    if (!tr) { setLocation('/journal/trades'); return; }
+    setTrade(tr);
+    if (tr.sessionId) {
+      const sess = await analysisService.getSessionById(tr.sessionId);
+      if (sess) setSession(sess);
+    }
+    try {
+      const existing = JSON.parse(tr.postTradeReview || '{}');
+      if (existing && typeof existing === 'object') {
+        setReview({ ...defaultPostTradeReview, ...existing });
+      }
+    } catch { /* use default */ }
+  };
+
+  const set = <K extends keyof PostTradeReviewData>(key: K, value: PostTradeReviewData[K]) =>
+    setReview(prev => ({ ...prev, [key]: value }));
+
+  const toggleBehaviorFlag = (flag: BehaviorFlag) => {
+    setReview(prev => ({
+      ...prev,
+      behaviorFlags: prev.behaviorFlags.includes(flag)
+        ? prev.behaviorFlags.filter(f => f !== flag)
+        : [...prev.behaviorFlags, flag],
+    }));
+  };
+
+  const handleSave = async (generateAI = false) => {
+    if (!trade) return;
+    setIsSaving(true);
+    try {
+      const toSave: PostTradeReviewData = {
+        ...review,
+        completedAt: review.completedAt || Date.now(),
+      };
+      const { generateAIAnalysis, savePostTradeReview } = await import('../services/postTradeReviewService');
+      if (generateAI) {
+        setIsGenerating(true);
+        const allTrades = await tradeService.getAllTrades();
+        const ai = generateAIAnalysis(trade, toSave, allTrades);
+        toSave.aiAnalysis = ai;
+      }
+      await savePostTradeReview(trade.id, toSave);
+      setReview(toSave);
+      toast.success('ریویو ذخیره شد');
+      if (generateAI) setCurrentStep(9);
+    } catch (e) {
+      toast.error('خطا در ذخیره');
+    } finally {
+      setIsSaving(false);
+      setIsGenerating(false);
+    }
+  };
+
+  const addUserCorrection = (field: string, label: string, original: string, corrected: string) => {
+    if (!corrected.trim()) return;
+    const correction = { field, label, originalValue: original, correctedValue: corrected, reason: correctionText, correctedAt: Date.now() };
+    setReview(prev => ({ ...prev, userCorrections: [...(prev.userCorrections || []), correction] }));
+    setShowCorrection(null);
+    setCorrectionText('');
+    toast.success('تصحیح ثبت شد');
+  };
+
+  if (!trade) return (
+    <div className="flex items-center justify-center min-h-[50vh]">
+      <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
     </div>
   );
 
