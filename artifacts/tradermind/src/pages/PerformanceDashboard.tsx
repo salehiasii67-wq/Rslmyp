@@ -1,4 +1,235 @@
-relatedSymbols: '[]', relatedSetups: '[]',
+/**
+ * PerformanceDashboard.tsx — Offline Personal Trading Performance & Behavioral Analytics Engine
+ * Prompt 25 — Mobile-first, fully offline, all analytics from local trade data
+ */
+import { useState, useEffect, useMemo } from 'react';
+import { Skeleton } from '../components/ui/skeleton';
+import {
+  BarChart3, Activity, Target, ShieldCheck, TrendingUp, TrendingDown,
+  Calendar, Clock, Layers, Lightbulb, AlertTriangle, CheckCircle2,
+  ChevronDown, ChevronUp, Star, Flame, Bookmark, X, RefreshCw,
+  Award, BarChart2, Users, BookOpen,
+} from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
+import { Button } from '../components/ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { toast } from 'sonner';
+import { db } from '../db/database';
+import type { Trade } from '../db/database';
+import {
+  calcBaseMetrics, getPerformanceProfile, getByDay, getByHour, getBySession,
+  getBySymbol, getBySetup, getBestCombos, getProcessQuality, detectMistakes,
+  detectStrengths, getOvertradingAnalysis, getTradingStyle, getEvolution,
+  getPerfInsights, getScorecard, getReviewPeriods, generateReview,
+  getDecisionQualityAnalysis, getSessionDiscipline, getBehavioralTimeline,
+  getLearningProgress,
+} from '../services/performanceService';
+import type {
+  BaseMetrics, PerformanceProfile, DayPerf, SessionPerf, SymbolPerf,
+  SetupPerf, ComboPerf, PerfInsight, Scorecard, BehaviorPattern,
+  DecisionQualityAnalysis, SessionDisciplineData, BehavioralTimelineEntry,
+  LessonTrackEntry,
+} from '../services/performanceService';
+import { getPostLossBehavior, getPostWinBehavior } from '../services/riskService';
+import { useAppStore } from '../store/useAppStore';
+
+// ─────────────────────────────────────────────────────────────────
+// UI Helpers
+// ─────────────────────────────────────────────────────────────────
+function pct(v: number | null, dec = 1) { return v !== null ? `${(v * 100).toFixed(dec)}%` : '—'; }
+function r(v: number | null, dec = 2) { return v !== null ? `${v >= 0 ? '+' : ''}${v.toFixed(dec)}R` : '—'; }
+function num(v: number | null, dec = 2) { return v !== null ? v.toFixed(dec) : '—'; }
+function moneyStr(v: number | null) {
+  if (v === null) return '—';
+  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}`;
+}
+
+function SmallSampleBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] bg-amber-500/10 text-amber-500 px-2 py-0.5 rounded-full shrink-0">
+      <AlertTriangle className="w-3 h-3" />نمونه کم
+    </span>
+  );
+}
+
+function StatRow({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-border/30 last:border-0">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <div className="text-right">
+        <span className={`text-sm font-semibold tabular-nums ${color ?? ''}`}>{value}</span>
+        {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, sub, color, icon: Icon }: {
+  label: string; value: string; sub?: string; color?: string; icon?: React.ElementType;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-card p-3 space-y-1">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {Icon && <Icon className="w-3.5 h-3.5" />}{label}
+      </div>
+      <p className={`text-xl font-bold tabular-nums ${color ?? ''}`}>{value}</p>
+      {sub && <p className="text-[10px] text-muted-foreground">{sub}</p>}
+    </div>
+  );
+}
+
+function BaseMetricsGrid({ m }: { m: BaseMetrics }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+      <MetricCard label="معاملات" value={m.count.toString()} />
+      <MetricCard label="نرخ برد" value={pct(m.winRate)} color={m.winRate !== null && m.winRate >= 0.5 ? 'text-green-500' : 'text-destructive'} />
+      <MetricCard label="R میانگین" value={r(m.avgR)} color={m.avgR !== null && m.avgR > 0 ? 'text-green-500' : m.avgR !== null ? 'text-destructive' : ''} />
+      <MetricCard label="انتظار" value={r(m.expectancy)} color={m.expectancy !== null && m.expectancy > 0 ? 'text-green-500' : m.expectancy !== null ? 'text-destructive' : ''} />
+    </div>
+  );
+}
+
+function WinLossBar({ win, loss, be }: { win: number; loss: number; be: number }) {
+  const total = win + loss + be;
+  if (total === 0) return null;
+  return (
+    <div className="flex h-2.5 rounded-full overflow-hidden gap-px">
+      <div className="bg-green-500" style={{ width: `${(win / total) * 100}%` }} title={`برد: ${win}`} />
+      <div className="bg-muted/40" style={{ width: `${(be / total) * 100}%` }} title={`سربه‌سر: ${be}`} />
+      <div className="bg-destructive/70" style={{ width: `${(loss / total) * 100}%` }} title={`ضرر: ${loss}`} />
+    </div>
+  );
+}
+
+function GradeBadge({ grade, score }: { grade: string; score: number }) {
+  const colors: Record<string, string> = { 'A': 'bg-green-500/10 text-green-500', 'B': 'bg-primary/10 text-primary', 'C': 'bg-amber-500/10 text-amber-500', 'D': 'bg-orange-500/10 text-orange-500', 'F': 'bg-destructive/10 text-destructive', 'N/A': 'bg-muted/30 text-muted-foreground' };
+  return (
+    <div className={`rounded-2xl p-5 text-center ${colors[grade] ?? colors['N/A']}`}>
+      <p className="text-xs text-muted-foreground mb-1">امتیاز</p>
+      <p className="text-5xl font-bold tabular-nums">{score.toFixed(0)}</p>
+      <p className="text-lg font-semibold mt-1">درجه {grade}</p>
+      <p className="text-xs text-muted-foreground mt-1">از ۱۰۰</p>
+    </div>
+  );
+}
+
+function BehaviorChip({ pattern }: { pattern: BehaviorPattern }) {
+  const isStrength = pattern.type === 'strength';
+  const severity = pattern.severity;
+  const color = isStrength ? 'bg-green-500/10 border-green-500/20 text-green-500'
+    : severity === 'high' ? 'bg-destructive/10 border-destructive/20 text-destructive'
+    : severity === 'medium' ? 'bg-amber-500/10 border-amber-500/20 text-amber-500'
+    : 'bg-muted/20 border-border text-muted-foreground';
+  return (
+    <div className={`rounded-xl border p-3 ${color}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          {isStrength ? <Star className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+          <p className="text-sm font-medium">{pattern.title}</p>
+        </div>
+        <span className="text-xs font-medium tabular-nums shrink-0">{Math.round(pattern.pct * 100)}%</span>
+      </div>
+      <p className="text-xs mt-1 opacity-80">{pattern.description}</p>
+      {pattern.avgOutcome !== null && (
+        <p className="text-xs mt-1 font-medium">{r(pattern.avgOutcome)} میانگین نتیجه</p>
+      )}
+    </div>
+  );
+}
+
+const TAB_LIST = [
+  { id: 'overview', label: 'داشبورد', icon: BarChart3 },
+  { id: 'breakdown', label: 'تفکیک زمانی', icon: Clock },
+  { id: 'instruments', label: 'نماد/سبک', icon: Layers },
+  { id: 'behavior', label: 'رفتار', icon: Activity },
+  { id: 'evolution', label: 'تحول', icon: TrendingUp },
+  { id: 'style', label: 'سبک معاملاتی', icon: Users },
+  { id: 'insights', label: 'بینش‌ها', icon: Lightbulb },
+] as const;
+type TabId = typeof TAB_LIST[number]['id'];
+
+// ─────────────────────────────────────────────────────────────────
+// Main Component
+// ─────────────────────────────────────────────────────────────────
+export default function PerformanceDashboard() {
+  const tradingTimeMode = useAppStore(s => s.tradingTimeMode);
+  const brokerUtcOffsetMinutes = useAppStore(s => s.brokerUtcOffsetMinutes);
+  const [tab, setTab] = useState<TabId>('overview');
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState<'all' | '3m' | '6m' | '1y'>('all');
+  const [evGranularity, setEvGranularity] = useState<'week' | 'month'>('month');
+  const [overtradingThreshold, setOvertradingThreshold] = useState(3);
+  const [expandedInsight, setExpandedInsight] = useState<string | null>(null);
+  const [dismissedInsights, setDismissedInsights] = useState<Set<string>>(
+    () => new Set(JSON.parse(localStorage.getItem('perf_dismissed_insights') ?? '[]'))
+  );
+  const [reviewPeriod, setReviewPeriod] = useState<string>('');
+  const [reviewType, setReviewType] = useState<'weekly' | 'monthly'>('monthly');
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [knowledgeNotes, setKnowledgeNotes] = useState<any[]>([]);
+  const [preferredSessions, setPreferredSessions] = useState<string[]>(
+    () => JSON.parse(localStorage.getItem('perf_preferred_sessions') ?? '["london","overlap"]')
+  );
+  const [timelineGranularity, setTimelineGranularity] = useState<'week' | 'month'>('month');
+
+  useEffect(() => {
+    Promise.all([
+      db.trades.toArray(),
+      db.knowledgeNotes.where('isRule').equals(1).toArray().catch(() => []),
+    ]).then(([t, kn]) => {
+      setTrades(t);
+      setKnowledgeNotes(kn);
+      setLoading(false);
+    });
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (timeRange === 'all') return trades;
+    const now = Date.now();
+    const ms = { '3m': 90, '6m': 180, '1y': 365 }[timeRange] * 86400000;
+    return trades.filter(t => t.openedAt >= now - ms);
+  }, [trades, timeRange, tradingTimeMode, brokerUtcOffsetMinutes]);
+
+  const profile = useMemo(() => getPerformanceProfile(filtered), [filtered]);
+  const scorecard = useMemo(() => getScorecard(filtered), [filtered]);
+  const processQ = useMemo(() => getProcessQuality(filtered), [filtered]);
+  const byDay = useMemo(() => getByDay(filtered), [filtered, tradingTimeMode, brokerUtcOffsetMinutes]);
+  const byHour = useMemo(() => getByHour(filtered), [filtered, tradingTimeMode, brokerUtcOffsetMinutes]);
+  const bySession = useMemo(() => getBySession(filtered), [filtered, tradingTimeMode, brokerUtcOffsetMinutes]);
+  const bySymbol = useMemo(() => getBySymbol(filtered), [filtered]);
+  const bySetup = useMemo(() => getBySetup(filtered), [filtered]);
+  const combos = useMemo(() => getBestCombos(filtered), [filtered]);
+  const mistakes = useMemo(() => detectMistakes(filtered), [filtered]);
+  const strengths = useMemo(() => detectStrengths(filtered), [filtered]);
+  const overtradingData = useMemo(() => getOvertradingAnalysis(filtered, overtradingThreshold), [filtered, overtradingThreshold]);
+  const tradingStyle = useMemo(() => getTradingStyle(filtered), [filtered]);
+  const evolution = useMemo(() => getEvolution(filtered, evGranularity), [filtered, evGranularity]);
+  const insights = useMemo(() => getPerfInsights(filtered), [filtered]);
+  const postLoss = useMemo(() => getPostLossBehavior(filtered), [filtered]);
+  const postWin = useMemo(() => getPostWinBehavior(filtered), [filtered]);
+  const reviewPeriods = useMemo(() => getReviewPeriods(trades, reviewType), [trades, reviewType]);
+  const decisionQuality = useMemo(() => getDecisionQualityAnalysis(filtered), [filtered]);
+  const sessionDiscipline = useMemo(() => getSessionDiscipline(filtered, preferredSessions), [filtered, preferredSessions]);
+  const behavioralTimeline = useMemo(() => getBehavioralTimeline(filtered, timelineGranularity), [filtered, timelineGranularity]);
+  const rules = useMemo(() => knowledgeNotes.filter((n: any) => n.isRule), [knowledgeNotes]);
+  const learningProgress = useMemo(
+    () => getLearningProgress(trades, rules.map((n: any) => ({ id: n.id, title: n.title, createdAt: n.createdAt }))),
+    [trades, rules]
+  );
+  const currentReview = useMemo(() => {
+    const key = reviewPeriod || reviewPeriods[0];
+    if (!key) return null;
+    return generateReview(trades, key, reviewType);
+  }, [trades, reviewPeriod, reviewPeriods, reviewType]);
+
+  const approveInsight = async (ins: PerfInsight) => {
+    const note = {
+      id: `perf_insight_${ins.id}_${Date.now()}`,
+      title: ins.title, content: `${ins.description}\n\nشواهد: ${ins.evidence}`,
+      category: 'ai-insights' as const, importance: (ins.confidence === 'high' ? 'high' : 'medium') as import('../db/database').NoteImportance,
+      color: ins.category === 'warning' ? '#ef4444' : '#22c55e',
+      tags: '["عملکرد","بینش"]', relatedSymbols: '[]', relatedSetups: '[]',
       relatedStrategies: '[]', relatedSessions: '[]', relatedMarketRegimes: '[]',
       relatedTimeframes: '[]', relatedDays: '[]', source: 'ai-generated' as const,
       status: 'active' as const, isActive: true, isPinned: false, isRule: true,
