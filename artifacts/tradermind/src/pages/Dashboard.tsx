@@ -1,4 +1,306 @@
- مقایسه با دوره قبلی (برای نشانگرهای delta)
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { Link, useLocation } from "wouter";
+import { Skeleton } from "../components/ui/skeleton";
+import { Trade, DailyJournal, Strategy, AnalysisSession, Phase, Step } from "../db/database";
+import { strategyService } from "../services/strategyService";
+import { analysisService } from "../services/analysisService";
+import { tradeService } from "../services/tradeService";
+import { journalService } from "../services/journalService";
+import { backupService } from "../services/backupService";
+import { accountService } from "../services/accountService";
+import { tradingBoxService } from "../services/tradingBoxService";
+import { Account, TradingBox } from "../db/database";
+import { db } from "../db/database";
+import {
+  computeAnalytics, filterTradesByRange, getDateRange,
+  InsightCard, PnlPoint,
+} from "../services/analyticsService";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/card";
+import { Button } from "../components/ui/button";
+import { Badge } from "../components/ui/badge";
+import { toast } from "sonner";
+import {
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  BarChart, Bar, Cell, CartesianGrid,
+} from "recharts";
+import {
+  ActivitySquare, PenLine, ChevronLeft, TrendingUp, TrendingDown,
+  BarChart3, Plus, Clock, CheckCircle2, Zap, BookOpen, FileArchive,
+  Lightbulb, Target, LayoutDashboard, AlertCircle, ArrowUpRight,
+  Minus, Shield, CreditCard, Box,
+} from "lucide-react";
+import { formatDateFa } from "../lib/i18n";
+import { getByDay, getBySession } from "../services/performanceService";
+import { useAppStore } from "../store/useAppStore";
+import { getTradingDateKey, getTradingDateRange, getTradingMonthKey } from "../lib/tradingTime";
+
+// ══════════════════════════════════════════════════════════════════
+// ثوابت و نوع‌ها
+// ══════════════════════════════════════════════════════════════════
+
+type RangeKey = "today" | "week" | "month" | "custom";
+
+const RANGE_LABELS: Record<RangeKey, string> = {
+  today: "امروز",
+  week: "این هفته",
+  month: "این ماه",
+  custom: "بازه دلخواه",
+};
+
+// اطلاعات پیشرفت هر Session نیمه‌کاره
+interface SessionProgress {
+  phaseName: string;
+  phaseIndex: number;   // از ۱
+  totalPhases: number;
+  answeredSteps: number;
+  totalSteps: number;
+  progressPct: number;  // ۰–۱۰۰
+}
+
+const RESULT_FA: Record<string, string> = {
+  win: "سود", loss: "ضرر", breakeven: "سر به سر",
+  "partial-win": "سود جزئی", "partial-loss": "ضرر جزئی", open: "باز", cancelled: "لغو",
+};
+const RESULT_CLS: Record<string, string> = {
+  win: "text-emerald-500", "partial-win": "text-teal-500",
+  loss: "text-rose-500", "partial-loss": "text-amber-500",
+  open: "text-blue-500",
+};
+const RESULT_BG: Record<string, string> = {
+  win: "bg-emerald-500/15", "partial-win": "bg-teal-500/15",
+  loss: "bg-rose-500/15", "partial-loss": "bg-amber-500/15",
+  open: "bg-blue-500/15",
+};
+
+const MOOD_EMOJI: Record<number, string> = {
+  1: "😞", 2: "😕", 3: "😐", 4: "🙂", 5: "😄",
+};
+
+// ── ساعت سلام
+function getGreeting(): string {
+  const h = new Date().getHours();
+  if (h >= 5  && h < 12) return "صبح بخیر";
+  if (h >= 12 && h < 17) return "ظهر بخیر";
+  if (h >= 17 && h < 21) return "عصر بخیر";
+  return "شب بخیر";
+}
+
+function getGreetingSub(): string {
+  const h = new Date().getHours();
+  if (h >= 5  && h < 12) return "روز خوبی برای تحلیل دقیق داشته باشی.";
+  if (h >= 12 && h < 17) return "آماده‌ای برای ثبت تحلیل‌های بعدازظهر؟";
+  if (h >= 17 && h < 21) return "وقت خوبی است ژورنال امروز را کامل کنی.";
+  return "اگر معامله‌ای باز داری، حتماً مرور کن.";
+}
+
+function todayStr(): string {
+  return getTradingDateKey(Date.now());
+}
+
+function moodLabel(v: number): string {
+  const labels: Record<number, string> = {
+    1: "خیلی بد", 2: "بد", 3: "متوسط", 4: "خوب", 5: "عالی",
+  };
+  return labels[Math.round(v)] ?? String(v);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// بارگذاری داده‌های داشبورد
+// ══════════════════════════════════════════════════════════════════
+
+interface DashboardData {
+  trades: Trade[];
+  sessions: AnalysisSession[];
+  journals: DailyJournal[];
+  strategies: Strategy[];
+  todayJournal: DailyJournal | undefined;
+  sessionProgress: Map<string, SessionProgress>;
+}
+
+async function loadDashboardData(queryFrom?: number, queryTo?: number): Promise<DashboardData> {
+  const [trades, sessions, journals, strategies, todayJournal] = await Promise.all([
+    queryFrom !== undefined && queryTo !== undefined
+      ? tradeService.getTradesByDateRange(queryFrom, queryTo)
+      : tradeService.getTradesByDateRange(Date.now() - 90 * 24 * 60 * 60 * 1000, Date.now()),
+    analysisService.getAllSessions(),
+    journalService.getAllJournals(),
+    strategyService.getAllStrategies(),
+    journalService.getJournalByDate(todayStr()),
+  ]);
+
+  // بارگذاری اطلاعات پیشرفت برای Session‌های نیمه‌کاره
+  const inProgress = sessions.filter(s => s.status === "in-progress").slice(0, 12);
+  const sessionProgress = new Map<string, SessionProgress>();
+
+  await Promise.all(inProgress.map(async session => {
+    try {
+      if (!session.strategyId) throw new Error('no strategyId');
+      const phases: Phase[] = await strategyService.getPhasesByStrategyId(session.strategyId);
+      const stepsPerPhase = await Promise.all(phases.map(p => strategyService.getStepsByPhaseId(p.id)));
+      const allSteps: Step[] = stepsPerPhase.flat();
+      const totalSteps = allSteps.length;
+      const answered = totalSteps > 0
+        ? Object.keys(JSON.parse(session.stepResults || "{}")||{}).length
+        : 0;
+      const phaseIdx = phases.findIndex(p => p.id === session.currentPhaseId);
+      const currentPhase = phaseIdx >= 0 ? phases[phaseIdx] : (phases[0] ?? null);
+      sessionProgress.set(session.id, {
+        phaseName: currentPhase?.name ?? "مرحله اول",
+        phaseIndex: phaseIdx >= 0 ? phaseIdx + 1 : 1,
+        totalPhases: phases.length || 1,
+        answeredSteps: answered,
+        totalSteps: totalSteps || 1,
+        progressPct: totalSteps > 0 ? Math.round((answered / totalSteps) * 100) : 0,
+      });
+    } catch {
+      sessionProgress.set(session.id, {
+        phaseName: "—", phaseIndex: 1, totalPhases: 1,
+        answeredSteps: 0, totalSteps: 1, progressPct: 0,
+      });
+    }
+  }));
+
+  return { trades, sessions, journals, strategies, todayJournal, sessionProgress };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// کامپوننت اصلی
+// ══════════════════════════════════════════════════════════════════
+
+export default function Dashboard() {
+  const [, setLocation] = useLocation();
+  const tradingTimeMode = useAppStore(s => s.tradingTimeMode);
+  const brokerUtcOffsetMinutes = useAppStore(s => s.brokerUtcOffsetMinutes);
+  const dashShowTrades = useAppStore(s => s.dashShowTrades);
+  const dashShowWinRate = useAppStore(s => s.dashShowWinRate);
+  const dashShowPnl = useAppStore(s => s.dashShowPnl);
+  const dashShowAvgR = useAppStore(s => s.dashShowAvgR);
+  const dashShowRecentTrades = useAppStore(s => s.dashShowRecentTrades);
+  const dashShowLastJournal = useAppStore(s => s.dashShowLastJournal);
+  const dashShowAdherence = useAppStore(s => s.dashShowAdherence);
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [rangeKey, setRangeKey] = useState<RangeKey>("week");
+  const [customFrom, setCustomFrom] = useState<string>(() => {
+    const d = new Date(); d.setDate(d.getDate() - 30);
+    return d.toISOString().split("T")[0];
+  });
+  const [customTo, setCustomTo] = useState<string>(() => new Date().toISOString().split("T")[0]);
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [tradingBoxes, setTradingBoxes] = useState<TradingBox[]>([]);
+  const customFromRef = useRef<HTMLInputElement>(null);
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    const selected = rangeKey === "custom"
+      ? {
+          from: getTradingDateRange(customFrom).from,
+          to: getTradingDateRange(customTo).to,
+        }
+      : getDateRange(rangeKey);
+    const duration = Math.max(24 * 60 * 60 * 1000, selected.to - selected.from);
+    return loadDashboardData(Math.max(0, selected.from - duration), selected.to)
+      .then(setData)
+      .catch(() => setError("بارگذاری داشبورد انجام نشد. لطفاً دوباره تلاش کنید."))
+      .finally(() => setLoading(false));
+  }, [rangeKey, customFrom, customTo]);
+
+  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => {
+    accountService.getAll().then(setAccounts);
+    tradingBoxService.getAll().then(setTradingBoxes);
+  }, []);
+
+  // ── Derived: معاملات بازه زمانی انتخابی
+  const rangedTrades = useMemo(() => {
+    if (!data) return [];
+    if (rangeKey === "custom") {
+      const from = getTradingDateRange(customFrom).from;
+      const to   = getTradingDateRange(customTo).to;
+      return filterTradesByRange(data.trades, from, to);
+    }
+    const { from, to } = getDateRange(rangeKey);
+    return filterTradesByRange(data.trades, from, to);
+  }, [data, rangeKey, customFrom, customTo, tradingTimeMode, brokerUtcOffsetMinutes]);
+
+  // ── Stats بازه انتخابی
+  const rangedStats = useMemo(() => {
+    const closed = rangedTrades.filter(t => t.status === "closed");
+    const wins = closed.filter(t => t.result === "win" || t.result === "partial-win");
+    const withR = closed.filter(t => t.rMultiple != null);
+    const totalPnl = closed.reduce((s, t) => s + (t.profitLoss || 0), 0);
+    return {
+      total: rangedTrades.length,
+      winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
+      avgR: withR.length > 0 ? withR.reduce((s, t) => s + (t.rMultiple || 0), 0) / withR.length : null,
+      totalPnl,
+      closedCount: closed.length,
+    };
+  }, [rangedTrades]);
+
+  // ── آخرین ۵ معامله
+  const recentTrades = useMemo(() => (data?.trades ?? []).slice(0, 5), [data]);
+
+  // ── آخرین ۳ ژورنال (بدون امروز در صورت وجود)
+  const recentJournals = useMemo(() => (data?.journals ?? []).slice(0, 3), [data]);
+
+  // ── تحلیل‌های نیمه‌کاره
+  const inProgressSessions = useMemo(
+    () => (data?.sessions ?? []).filter(s => s.status === "in-progress"),
+    [data],
+  );
+
+  // ── Equity curve (۲۰ معامله آخر بسته)
+  const equityCurve = useMemo((): PnlPoint[] => {
+    if (!data) return [];
+    const closed = [...data.trades.filter(t => t.status === "closed")]
+      .sort((a, b) => (a.closedAt || a.openedAt) - (b.closedAt || b.openedAt))
+      .slice(-20);
+    let cum = 0;
+    return closed.map((t, i) => {
+      cum += t.profitLoss || 0;
+      return { index: i + 1, symbol: t.symbol, pnl: +(t.profitLoss || 0).toFixed(2), cumulative: +cum.toFixed(2) };
+    });
+  }, [data, tradingTimeMode, brokerUtcOffsetMinutes]);
+
+  // ── Insights (فقط اگه داده کافی باشه)
+  const insights = useMemo((): InsightCard[] => {
+    if (!data || data.trades.length < 5) return [];
+    const analytics = computeAnalytics(data.trades, data.journals, data.strategies);
+    return analytics.insights.filter(i => i.type !== "neutral" || data.trades.length >= 10).slice(0, 3);
+  }, [data]);
+
+  // ── آخرین استراتژی استفاده‌شده
+  const lastUsedStrategy = useMemo(() => {
+    if (!data || data.sessions.length === 0) return null;
+    const lastSession = data.sessions[0]; // sessions are sorted by startedAt desc
+    const strat = data.strategies.find(s => s.id === lastSession.strategyId);
+    if (!strat) return null;
+    const count = data.sessions.filter(s => s.strategyId === strat.id).length;
+    return { strategy: strat, count, lastSession };
+  }, [data]);
+
+  // ── پایبندی این هفته
+  const weekAdherence = useMemo(() => {
+    if (!data) return null;
+    const { from, to } = getDateRange("week");
+    const weekTrades = filterTradesByRange(data.trades, from, to)
+      .filter(t => t.adherenceScore != null);
+    if (weekTrades.length < 2) return null;
+    const avg = weekTrades.reduce((s, t) => s + (t.adherenceScore || 0), 0) / weekTrades.length;
+    return Math.round(avg);
+  }, [data]);
+
+  // ── Map استراتژی‌ها
+  const stratMap = useMemo(
+    () => new Map(data?.strategies.map(s => [s.id, s.name]) ?? []),
+    [data],
+  );
+
+  // ── مقایسه با دوره قبلی (برای نشانگرهای delta)
   const prevRangedStats = useMemo(() => {
     if (!data || rangeKey === "custom") return null;
     const { from, to } = getDateRange(rangeKey as Exclude<RangeKey, "custom">);
