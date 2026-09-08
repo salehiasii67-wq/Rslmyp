@@ -1,4 +1,93 @@
-rder-0">
+/**
+ * EdgeAnalytics — Deep Multi-Dimensional Analytics Dashboard (Prompt 17 — Complete)
+ * Mobile-first, RTL Persian UI
+ */
+import { useState, useEffect, useMemo } from 'react';
+import { Skeleton } from '../components/ui/skeleton';
+import { db } from '../db/database';
+import { Trade, Strategy } from '../db/database';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  Cell, ReferenceLine, ScatterChart, Scatter, ZAxis,
+} from 'recharts';
+import {
+  TrendingUp, Zap, Clock, Activity, BarChart2, Calendar, Brain,
+  AlertCircle, Target, Shield, Search, MessageSquare, DollarSign, Filter, X,
+} from 'lucide-react';
+import { cn } from '../lib/utils';
+import { useAppStore } from '../store/useAppStore';
+import {
+  computeEdgeAnalytics, computeExtendedAnalytics, filterCalendarMonths,
+  EdgeAnalyticsResult, ExtendedAnalyticsResult, SliceMetrics, ConfidenceLevel,
+  CONFIDENCE_FA, DEFAULT_SESSIONS, NL_QUESTIONS, answerNLQuestion,
+  PERSIAN_DAYS, NLAnswer, EdgeInsight, CalendarMonth,
+} from '../services/edgeAnalyticsService';
+
+// ── Color palette ─────────────────────────────────────────────────────────────
+const C = { win:'#10b981', loss:'#ef4444', neutral:'#6366f1', primary:'#8b5cf6', amber:'#f59e0b', blue:'#3b82f6', muted:'#6b7280' };
+
+const TZ_OPTIONS = [
+  { value: '0',   label: 'UTC+0 (لندن)' },
+  { value: '3.5', label: 'UTC+3:30 (تهران)' },
+  { value: '4.5', label: 'UTC+4:30 (تهران DST)' },
+  { value: '-5',  label: 'UTC-5 (نیویورک)' },
+  { value: '-4',  label: 'UTC-4 (نیویورک DST)' },
+  { value: '8',   label: 'UTC+8 (سنگاپور)' },
+  { value: '9',   label: 'UTC+9 (توکیو)' },
+];
+
+// ── Shared UI helpers ─────────────────────────────────────────────────────────
+
+function ConfidenceBadge({ level }: { level: ConfidenceLevel }) {
+  const cls: Record<ConfidenceLevel, string> = {
+    insufficient: 'bg-muted/30 text-muted-foreground border-border',
+    weak:   'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    moderate:'bg-blue-500/10 text-blue-400 border-blue-500/20',
+    strong: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  };
+  return <span className={cn('text-xs px-1.5 py-0.5 rounded border font-medium shrink-0',cls[level])}>{CONFIDENCE_FA[level]}</span>;
+}
+
+function RBadge({ value, size = 'sm' }: { value: number | null; size?: 'xs'|'sm' }) {
+  if (value == null) return <span className="text-muted-foreground text-xs">—</span>;
+  const cls = value > 0 ? 'text-emerald-400' : value < 0 ? 'text-rose-400' : 'text-muted-foreground';
+  return <span className={cn('font-bold', size==='xs'?'text-[11px]':'text-xs', cls)}>{value>0?'+':''}{value.toFixed(2)}R</span>;
+}
+
+function WinBar({ winRate, count }: { winRate: number; count: number }) {
+  return (
+    <div className="flex items-center gap-1.5 flex-1">
+      <div className="flex-1 bg-muted/20 rounded-full h-1.5 min-w-0">
+        <div className={cn('h-1.5 rounded-full', winRate >= 50 ? 'bg-emerald-500' : 'bg-rose-500')} style={{ width:`${Math.min(winRate,100)}%` }} />
+      </div>
+      <span className="text-xs w-8 shrink-0">{winRate.toFixed(0)}٪</span>
+      <span className="text-xs text-muted-foreground shrink-0">({count})</span>
+    </div>
+  );
+}
+
+function MetricsCard({ title, color, metrics }: { title: string; color: string; metrics: SliceMetrics }) {
+  return (
+    <div className="bg-muted/20 border border-border rounded-lg p-3 space-y-1.5">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-sm font-semibold" style={{ color }}>{title}</span>
+        <ConfidenceBadge level={metrics.confidence} />
+      </div>
+      {[
+        ['معاملات',    `${metrics.count}` ],
+        ['درصد برد',   `${metrics.winRate.toFixed(0)}٪`],
+        ['میانگین R',  null],
+        ['کل R',       null],
+        ['PF',         metrics.profitFactor?.toFixed(2) ?? null],
+        ['نگهداری',    metrics.avgHoldingMinutes ? `${metrics.avgHoldingMinutes < 60 ? metrics.avgHoldingMinutes.toFixed(0)+'د' : (metrics.avgHoldingMinutes/60).toFixed(1)+'س'}` : null],
+      ].map(([label, val], i) => val !== null ? (
+        <div key={i} className="flex justify-between text-xs py-0.5 border-b border-border/40 last:border-0">
           <span className="text-muted-foreground">{label}</span>
           <span className="font-medium">{val}</span>
         </div>
