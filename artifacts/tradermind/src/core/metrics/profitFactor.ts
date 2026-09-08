@@ -7,7 +7,7 @@
  */
 
 import { Trade } from '../../db/database';
-import { isClosed, isWin, isLoss } from '../../lib/tradeHelpers';
+import { isClosed, isWin, isLoss, netPnl } from '../../lib/tradeHelpers';
 
 export interface ProfitFactorResult {
   profitFactor: number | null;
@@ -24,8 +24,8 @@ export function computeProfitFactor(trades: Trade[]): ProfitFactorResult {
   const wins = closed.filter(isWin);
   const losses = closed.filter(isLoss);
 
-  const totalWinPnl = wins.reduce((s, t) => s + Math.max(0, t.profitLoss ?? 0), 0);
-  const totalLossPnl = Math.abs(losses.reduce((s, t) => s + Math.min(0, t.profitLoss ?? 0), 0));
+  const totalWinPnl = closed.reduce((s, t) => s + Math.max(0, netPnl(t)), 0);
+  const totalLossPnl = Math.abs(closed.reduce((s, t) => s + Math.min(0, netPnl(t)), 0));
   const profitFactor = totalLossPnl > 0 ? totalWinPnl / totalLossPnl : null;
 
   const totalWinR = wins.reduce((s, t) => s + Math.max(0, t.rMultiple ?? 0), 0);
