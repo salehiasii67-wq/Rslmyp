@@ -1,6 +1,7 @@
 {
   "name": "@workspace/tradermind",
-  "version": "1.0.0",
+  "version": "1.4.0",
+  "description": "ژورنال معاملاتی آفلاین TraderMind OS",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,14 +13,26 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:ui": "vitest --ui --config vitest.config.ts",
     "electron:dev": "concurrently \"pnpm dev\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "pnpm build && electron-builder"
+    "electron:build": "pnpm build && electron-builder",
+    "electron:build:vite": "vite build --config vite.electron.config.ts",
+    "electron:compile": "tsc --project tsconfig.electron.json && node -e \"require('fs').writeFileSync('electron/dist/package.json', JSON.stringify({type:'commonjs'}))\"",
+    "electron:build:win": "pnpm run electron:build:vite && pnpm run electron:compile && electron-builder --win --config electron-builder.json --publish never",
+    "android:build:vite": "vite build --config vite.capacitor.config.ts",
+    "android:sync": "pnpm run android:build:vite && cap sync android"
   },
   "dependencies": {
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/filesystem": "7.0.1",
+    "@capacitor/local-notifications": "^7.0.0",
+    "@capacitor/share": "7.0.4",
     "dexie": "^4.0.10",
     "jszip": "^3.10.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
