@@ -1,4 +1,383 @@
-symbol = customInput.trim().toUpperCase();
+import { useState, useEffect, useRef, useCallback, type ComponentProps } from "react";
+import { Capacitor } from "@capacitor/core";
+import { Link, useLocation } from "wouter";
+import { tradeService } from "../services/tradeService";
+import { analysisService } from "../services/analysisService";
+import { strategyService } from "../services/strategyService";
+import { accountService } from "../services/accountService";
+import { tradingBoxService } from "../services/tradingBoxService";
+import { db, Trade, Strategy, AnalysisSession, Account, TradingBox } from "../db/database";
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
+import { Label } from "../components/ui/label";
+import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { ArrowLeft, Save, Eye, Plus, X, Image as ImageIcon, Zap, BookOpen, ChevronDown, ChevronUp, CheckSquare, Square, CreditCard, Box, Mic, MicOff, Keyboard } from "lucide-react";
+import { toast } from "sonner";
+import { Progress } from "../components/ui/progress";
+import { format } from "date-fns";
+import PreTradeInsightPanel from "../components/PreTradeInsightPanel";
+import ScreenshotManager from "../components/ScreenshotManager";
+import { TradeScreenshot } from "../types/screenshot";
+import { getTradingDateTimeInput, parseTradingDateTimeInput } from "../lib/tradingTime";
+import { detectTradingSession } from "../lib/tradeClassification";
+import { useNavigationGuard, useGuardedNavigation } from "../navigation/NavigationGuard";
+import { getTradeNetPnl } from "../lib/tradeClassification";
+
+const MARKETS = ['Forex', 'Crypto', 'Indices', 'Stocks', 'Commodities', 'Other'];
+
+// ── لیست نمادهای معاملاتی رایج ──────────────────────────────────────────────
+const TRADING_SYMBOLS: { label: string; value: string; market: string }[] = [
+  // فارکس — جفت‌ارزهای اصلی
+  { label: 'EURUSD', value: 'EURUSD', market: 'Forex' },
+  { label: 'GBPUSD', value: 'GBPUSD', market: 'Forex' },
+  { label: 'USDJPY', value: 'USDJPY', market: 'Forex' },
+  { label: 'USDCHF', value: 'USDCHF', market: 'Forex' },
+  { label: 'AUDUSD', value: 'AUDUSD', market: 'Forex' },
+  { label: 'NZDUSD', value: 'NZDUSD', market: 'Forex' },
+  { label: 'USDCAD', value: 'USDCAD', market: 'Forex' },
+  // فارکس — جفت‌ارزهای متقاطع
+  { label: 'EURGBP', value: 'EURGBP', market: 'Forex' },
+  { label: 'EURJPY', value: 'EURJPY', market: 'Forex' },
+  { label: 'EURCHF', value: 'EURCHF', market: 'Forex' },
+  { label: 'GBPJPY', value: 'GBPJPY', market: 'Forex' },
+  { label: 'GBPCHF', value: 'GBPCHF', market: 'Forex' },
+  { label: 'AUDJPY', value: 'AUDJPY', market: 'Forex' },
+  { label: 'AUDNZD', value: 'AUDNZD', market: 'Forex' },
+  { label: 'CADJPY', value: 'CADJPY', market: 'Forex' },
+  { label: 'CHFJPY', value: 'CHFJPY', market: 'Forex' },
+  { label: 'EURAUD', value: 'EURAUD', market: 'Forex' },
+  { label: 'EURCAD', value: 'EURCAD', market: 'Forex' },
+  { label: 'EURNZD', value: 'EURNZD', market: 'Forex' },
+  { label: 'GBPAUD', value: 'GBPAUD', market: 'Forex' },
+  { label: 'GBPCAD', value: 'GBPCAD', market: 'Forex' },
+  { label: 'GBPNZD', value: 'GBPNZD', market: 'Forex' },
+  { label: 'NZDJPY', value: 'NZDJPY', market: 'Forex' },
+  // کالاها
+  { label: 'XAUUSD — طلا', value: 'XAUUSD', market: 'Commodities' },
+  { label: 'XAGUSD — نقره', value: 'XAGUSD', market: 'Commodities' },
+  { label: 'XPTUSD — پلاتین', value: 'XPTUSD', market: 'Commodities' },
+  { label: 'USOIL — نفت خام WTI', value: 'USOIL', market: 'Commodities' },
+  { label: 'UKOIL — نفت برنت', value: 'UKOIL', market: 'Commodities' },
+  { label: 'NATGAS — گاز طبیعی', value: 'NATGAS', market: 'Commodities' },
+  // شاخص‌ها
+  { label: 'US30 — داو جونز', value: 'US30', market: 'Indices' },
+  { label: 'NAS100 — نزدک', value: 'NAS100', market: 'Indices' },
+  { label: 'SPX500 — اس‌اند‌پی ۵۰۰', value: 'SPX500', market: 'Indices' },
+  { label: 'GER40 — داکس', value: 'GER40', market: 'Indices' },
+  { label: 'UK100 — فوتسی ۱۰۰', value: 'UK100', market: 'Indices' },
+  { label: 'JPN225 — نیکی', value: 'JPN225', market: 'Indices' },
+  { label: 'FRA40 — کک', value: 'FRA40', market: 'Indices' },
+  { label: 'AUS200 — ASX200', value: 'AUS200', market: 'Indices' },
+  { label: 'VIX — شاخص نوسان', value: 'VIX', market: 'Indices' },
+  // کریپتو
+  { label: 'BTCUSDT — بیت‌کوین', value: 'BTCUSDT', market: 'Crypto' },
+  { label: 'ETHUSDT — اتریوم', value: 'ETHUSDT', market: 'Crypto' },
+  { label: 'BNBUSDT — بایننس', value: 'BNBUSDT', market: 'Crypto' },
+  { label: 'SOLUSDT — سولانا', value: 'SOLUSDT', market: 'Crypto' },
+  { label: 'XRPUSDT — ریپل', value: 'XRPUSDT', market: 'Crypto' },
+  { label: 'ADAUSDT — کاردانو', value: 'ADAUSDT', market: 'Crypto' },
+  { label: 'DOGEUSDT — دوج‌کوین', value: 'DOGEUSDT', market: 'Crypto' },
+  { label: 'DOTUSDT — پولکادات', value: 'DOTUSDT', market: 'Crypto' },
+  { label: 'LTCUSDT — لایت‌کوین', value: 'LTCUSDT', market: 'Crypto' },
+  { label: 'AVAXUSDT — آوالانچ', value: 'AVAXUSDT', market: 'Crypto' },
+  { label: 'MATICUSDT — پالیگان', value: 'MATICUSDT', market: 'Crypto' },
+  { label: 'LINKUSDT — چین‌لینک', value: 'LINKUSDT', market: 'Crypto' },
+  { label: 'ATOMUSDT — کازموس', value: 'ATOMUSDT', market: 'Crypto' },
+  { label: 'NEARUSDT — نیر', value: 'NEARUSDT', market: 'Crypto' },
+  { label: 'SUIUSDT — سوئی', value: 'SUIUSDT', market: 'Crypto' },
+  { label: 'PEPEUSDT — پپه', value: 'PEPEUSDT', market: 'Crypto' },
+  { label: 'TRUMPUSDT — ترامپ', value: 'TRUMPUSDT', market: 'Crypto' },
+];
+
+const QUICK_SYMBOLS = [
+  { value: 'XAUUSD', label: 'طلا', market: 'Commodities' },
+  { value: 'EURUSD', label: 'یورو به دلار', market: 'Forex' },
+  { value: 'GBPUSD', label: 'پوند به دلار', market: 'Forex' },
+  { value: 'USDJPY', label: 'دلار به ین', market: 'Forex' },
+  { value: 'USDCHF', label: 'دلار به فرانک', market: 'Forex' },
+  { value: 'AUDUSD', label: 'دلار استرالیا به دلار', market: 'Forex' },
+  { value: 'USDCAD', label: 'دلار کانادا به دلار', market: 'Forex' },
+  { value: 'NZDUSD', label: 'دلار نیوزیلند به دلار', market: 'Forex' },
+];
+const CUSTOM_SYMBOLS_KEY = 'tradermind-custom-symbols';
+const CUSTOM_SETUPS_KEY = 'tradermind-custom-setups';
+
+const QUICK_TEMPLATES = [
+  { id: 'trend-long', label: 'روندی لانگ', direction: 'long' as const, setupType: 'trend-continuation', tradingSession: 'london' },
+  { id: 'trend-short', label: 'روندی شورت', direction: 'short' as const, setupType: 'trend-continuation', tradingSession: 'new-york' },
+  { id: 'liquidity-reversal', label: 'لو‌هانت و برگشت', direction: 'long' as const, setupType: 'liquidity-grab', tradingSession: 'london' },
+];
+
+function getCustomSymbols(): { label: string; value: string; market: string }[] {
+  try {
+    const values = JSON.parse(localStorage.getItem(CUSTOM_SYMBOLS_KEY) ?? '[]');
+    if (!Array.isArray(values)) return [];
+    return values.filter((item): item is { label: string; value: string; market: string } =>
+      item && typeof item.value === 'string' && typeof item.label === 'string'
+    );
+  } catch {
+    return [];
+  }
+}
+
+function getCustomSetups(): string[] {
+  try {
+    const values = JSON.parse(localStorage.getItem(CUSTOM_SETUPS_KEY) ?? '[]');
+    return Array.isArray(values)
+      ? values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+// لیست حجم پوزیشن (لات) با گام ۰.۰۱ تا یک لات، سپس مقادیر بزرگ‌تر
+const POSITION_SIZE_OPTIONS = [
+  ...Array.from({ length: 100 }, (_, index) => Number(((index + 1) / 100).toFixed(2))),
+  1.25, 1.50, 1.75, 2.00, 2.50, 3.00, 4.00, 5.00, 7.50, 10.00,
+  15.00, 20.00, 25.00, 30.00, 50.00, 100.00,
+];
+
+// لیست درصد ریسک
+const RISK_PERCENTAGE_OPTIONS = [
+  0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00,
+  2.50, 3.00, 4.00, 5.00, 7.50, 10.00,
+];
+
+function normalizeDecimalInput(value: string): string {
+  const normalized = value
+    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
+    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[٫,]/g, '.')
+    .replace(/[^\d.-]/g, '');
+  const sign = normalized.startsWith('-') ? '-' : '';
+  const unsigned = normalized.replace(/-/g, '');
+  const [whole = '', ...fraction] = unsigned.split('.');
+  return `${sign}${whole}${fraction.length > 0 ? `.${fraction.join('')}` : ''}`;
+}
+
+function customDecimalValue(value: string): number | null {
+  if (!value || value === '.') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function decimalValue(value: string): number | null {
+  if (!value || value === '.' || value === '-') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function NumericInput({
+  value,
+  onValueChange,
+  ...props
+}: Omit<ComponentProps<typeof Input>, 'value' | 'onChange'> & {
+  value: number | null | undefined;
+  onValueChange: (value: number | null) => void;
+}) {
+  const [text, setText] = useState(value == null ? '' : String(value));
+  const lastSyncedValue = useRef<number | null>(value ?? null);
+
+  useEffect(() => {
+    const externalValue = value ?? null;
+    if (externalValue !== lastSyncedValue.current) {
+      setText(externalValue == null ? '' : String(externalValue));
+      lastSyncedValue.current = externalValue;
+    }
+  }, [value]);
+
+  return (
+    <Input
+      {...props}
+      type="text"
+      inputMode="decimal"
+      step="any"
+      value={text}
+      onChange={event => {
+        const nextText = normalizeDecimalInput(event.target.value);
+        const nextValue = decimalValue(nextText);
+        setText(nextText);
+        lastSyncedValue.current = nextValue;
+        onValueChange(nextValue);
+      }}
+      dir="ltr"
+    />
+  );
+}
+
+function StableTextarea({
+  value,
+  onChange,
+  voice = false,
+  ...props
+}: ComponentProps<typeof Textarea> & { voice?: boolean }) {
+  const externalValue = typeof value === 'string' ? value : '';
+  const [text, setText] = useState(externalValue);
+
+  useEffect(() => {
+    // فقط وقتی مقدار واقعاً از بیرون تغییر کرده است همگام‌سازی کن.
+    // این کار از بازنشانی caret هنگام هر رندر فرم جلوگیری می‌کند.
+    if (externalValue !== text) setText(externalValue);
+  }, [externalValue, text]);
+
+  const appendVoiceText = (spoken: string) => {
+    const next = `${text}${text.trim() ? ' ' : ''}${spoken}`.trim();
+    setText(next);
+    onChange?.({ target: { value: next } } as any);
+  };
+
+  return (
+    <div className="relative">
+      <Textarea
+        {...props}
+        value={text}
+        className={`${props.className ?? ''}${voice ? ' pb-10' : ''}`}
+        onChange={event => {
+          setText(event.target.value);
+          onChange?.(event);
+        }}
+      />
+      {voice && (
+        <div className="absolute bottom-1 left-1">
+          <VoiceInputButton onText={appendVoiceText} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VoiceInputButton({ onText }: { onText: (text: string) => void }) {
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  const isWebRuntime =
+    typeof window !== 'undefined' &&
+    window.location.protocol !== 'file:' &&
+    !window.electronAPI?.isElectron &&
+    !Capacitor.isNativePlatform();
+
+  if (!isWebRuntime) return null;
+
+  const toggle = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      toast.error('تبدیل گفتار به متن در این مرورگر پشتیبانی نمی‌شود.');
+      return;
+    }
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'fa-IR';
+    recognition.interimResults = false;
+    recognition.continuous = false;
+    recognition.onresult = (event: any) => {
+      const text = event.results?.[0]?.[0]?.transcript;
+      if (text) onText(text);
+    };
+    recognition.onerror = () => {
+      setListening(false);
+      toast.error('دریافت صدا انجام نشد.');
+    };
+    recognition.onend = () => setListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+    setListening(true);
+  };
+
+  return (
+    <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={toggle}>
+      {listening ? <MicOff className="h-3.5 w-3.5 text-rose-500" /> : <Mic className="h-3.5 w-3.5" />}
+      {listening ? 'در حال شنیدن…' : 'گفتار به متن'}
+    </Button>
+  );
+}
+
+// حالت‌های احساسی به فارسی
+const EMOTIONS = [
+  { id: 'Calm',            label: 'آرام',                 color: 'bg-sky-500' },
+  { id: 'Confident',       label: 'مطمئن',                color: 'bg-emerald-500' },
+  { id: 'Uncertain',       label: 'نامطمئن',              color: 'bg-amber-500' },
+  { id: 'Fearful',         label: 'ترسیده',               color: 'bg-orange-500' },
+  { id: 'Anxious',         label: 'مضطرب',                color: 'bg-orange-500' },
+  { id: 'Excited',         label: 'هیجان‌زده',            color: 'bg-violet-500' },
+  { id: 'Frustrated',      label: 'ناکام',                color: 'bg-red-500' },
+  { id: 'FOMO',            label: 'ترس از دست دادن',      color: 'bg-rose-500' },
+  { id: 'Revenge Trading', label: 'معامله انتقامی',       color: 'bg-red-600' },
+  { id: 'Overconfident',   label: 'بیش از حد مطمئن',      color: 'bg-yellow-500' },
+  { id: 'Tired',           label: 'خسته',                 color: 'bg-slate-500' },
+  { id: 'Distracted',      label: 'حواس‌پرت',             color: 'bg-slate-500' },
+];
+
+// ── کامپوننت انتخاب نماد با جستجو ──────────────────────────────────────────
+function SymbolSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [customSymbols, setCustomSymbols] = useState(getCustomSymbols);
+  const [customInput, setCustomInput] = useState('');
+  const allSymbols = [...TRADING_SYMBOLS, ...customSymbols];
+
+  const displayValue = value || '';
+
+  return (
+    <div className="space-y-1">
+      <div className="relative">
+        <Input
+          placeholder="وارد کردن نماد (مثلاً EURUSD، BTCUSDT، XAUUSD)"
+          value={displayValue}
+          onChange={e => {
+            const v = e.target.value.toUpperCase();
+            onChange(v);
+          }}
+          className="text-lg font-bold uppercase"
+          autoComplete="off"
+        />
+      </div>
+      {displayValue && (
+        <p className="text-xs text-muted-foreground">
+          {allSymbols.find(s => s.value === displayValue)?.market || 'نماد سفارشی'}
+          {' • '}
+          {allSymbols.find(s => s.value === displayValue)?.label.includes('—')
+            ? allSymbols.find(s => s.value === displayValue)?.label.split('—')[1].trim()
+            : displayValue}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-1.5 pt-1">
+        {QUICK_SYMBOLS.map(sym => (
+          <button
+            key={sym.value}
+            type="button"
+            className={`rounded-md border px-2 py-1 text-xs transition-colors ${
+              displayValue === sym.value
+                ? 'border-primary bg-primary/10 text-primary'
+                : 'border-border text-muted-foreground hover:border-primary/50 hover:text-foreground'
+            }`}
+            onClick={() => onChange(sym.value)}
+          >
+            {sym.value} <span className="opacity-70">({sym.label})</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-2 pt-1">
+        <Input
+          value={customInput}
+          onChange={e => setCustomInput(e.target.value.toUpperCase())}
+          placeholder="نماد سفارشی، مثلاً US100"
+          className="h-8 text-sm"
+          dir="ltr"
+          autoComplete="off"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0"
+          disabled={!customInput.trim()}
+          onClick={() => {
+            const symbol = customInput.trim().toUpperCase();
             if (!symbol) return;
             const next = [...customSymbols.filter(s => s.value !== symbol), { value: symbol, label: 'نماد سفارشی', market: tradeMarket(symbol) }];
             setCustomSymbols(next);
