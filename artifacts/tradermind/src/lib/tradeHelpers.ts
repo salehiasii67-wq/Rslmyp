@@ -12,6 +12,7 @@
  */
 
 import type { Trade, PostTradeReviewData, BehaviorFlag } from '../db/database';
+import { getTradingDateKey, getTradingMonthKey } from './tradingTime';
 
 // ── وضعیت معامله ──────────────────────────────────────────────────────────────
 
@@ -25,12 +26,12 @@ export const isBreakEven= (t: Trade): boolean => t.result === 'breakeven';
 
 /** تبدیل timestamp به رشته YYYY-MM-DD */
 export function toDateStr(ts: number): string {
-  return new Date(ts).toISOString().slice(0, 10);
+  return getTradingDateKey(ts);
 }
 
 /** تبدیل timestamp به رشته YYYY-MM */
 export function toMonthStr(ts: number): string {
-  return new Date(ts).toISOString().slice(0, 7);
+  return getTradingMonthKey(ts);
 }
 
 // ── ریاضیات ───────────────────────────────────────────────────────────────────
@@ -66,6 +67,17 @@ export function coefficientOfVariation(arr: number[]): number | null {
 /** جمع آرایه */
 export function sum(arr: number[]): number {
   return arr.reduce((s, v) => s + v, 0);
+}
+
+/** Net realized P/L including explicit transaction costs. */
+export function netPnl(t: Trade): number {
+  const gross = typeof t.profitLoss === 'number' && Number.isFinite(t.profitLoss)
+    ? t.profitLoss
+    : 0;
+  const fees = typeof t.fees === 'number' && Number.isFinite(t.fees) ? t.fees : 0;
+  const commission = typeof t.commission === 'number' && Number.isFinite(t.commission) ? t.commission : 0;
+  const spread = typeof t.spread === 'number' && Number.isFinite(t.spread) ? t.spread : 0;
+  return gross - fees - commission - spread;
 }
 
 /** کلمپ عدد بین min و max */
