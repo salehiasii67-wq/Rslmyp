@@ -1,4 +1,59 @@
-[];
+import JSZip from 'jszip';
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
+import { db, Trade, Strategy, Phase, Step, Rule, AnalysisSession, DailyJournal, dataUrlToBlob } from '../db/database';
+import { securityService } from '../security/securityService';
+import { APP_VERSION, DB_VERSION, BACKUP_FORMAT_VERSION, SCHEMA_VERSION } from '../constants/version';
+
+export { APP_VERSION, DB_VERSION, BACKUP_FORMAT_VERSION, SCHEMA_VERSION };
+
+const STORAGE_KEY_HISTORY = 'tradermind-backup-history';
+const STORAGE_KEY_APP = 'tradermind-app-storage';
+const STORAGE_KEY_LAST = 'tradermind-last-backup';
+
+// ─────────────────────────────────────────────
+// انواع
+// ─────────────────────────────────────────────
+export interface BackupMetadata {
+  appName: string;
+  backupVersion: string;
+  appVersion: string;
+  databaseVersion: number;
+  /** نسخه Schema — اضافه شده در v3.0 */
+  schemaVersion: number;
+  createdAt: string;
+  totalRecords: number;
+  /** SHA-256 از JSON رشته‌ای داده‌ها — برای بررسی یکپارچگی */
+  checksum?: string;
+  /** آیا داده‌ها رمزگذاری شده‌اند؟ */
+  encrypted?: boolean;
+}
+
+export interface BackupData {
+  metadata: BackupMetadata;
+  data: {
+    strategies: Strategy[];
+    phases: Phase[];
+    steps: Step[];
+    rules: Rule[];
+    analysisSessions: AnalysisSession[];
+    trades: Trade[];
+    dailyJournals: DailyJournal[];
+    settings: Record<string, string>;
+    // فیلدهای اختیاری — ممکن است در نسخه‌های قدیمی‌تر وجود نداشته باشند
+    symbolProfiles?: unknown[];
+    learningAuditTrail?: unknown[];
+    profileSnapshots?: unknown[];
+    profileCorrections?: unknown[];
+    knowledgeCategories?: unknown[];
+    replayDatasets?: unknown[];
+    replayPlaylists?: unknown[];
+    marketContextSessions?: unknown[];
+    tradeEvents?: unknown[];
+    tradeVersions?: unknown[];
+    chartScreenshots?: unknown[];
+    riskViolations?: unknown[];
     riskProfiles?: unknown[];
     riskGroups?: unknown[];
     replaySessions?: unknown[];
