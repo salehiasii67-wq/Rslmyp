@@ -8,7 +8,7 @@
  */
 
 import { Trade } from '../db/database';
-import { isWin, isLoss, isClosed } from '../lib/tradeHelpers';
+import { isWin, isLoss, isClosed, netPnl } from '../lib/tradeHelpers';
 
 // ── Message Types ─────────────────────────────────────────────────────────────
 
@@ -111,8 +111,8 @@ function computeEdge(trades: Trade[]): EdgeAnalyticsResult {
   const expectancy = winRate !== null && lossRate !== null && avgWinR !== null && avgLossR !== null
     ? winRate * avgWinR + lossRate * avgLossR : null;
 
-  const totalWin = wins.reduce((s, t) => s + Math.max(0, t.profitLoss ?? 0), 0);
-  const totalLoss = Math.abs(losses.reduce((s, t) => s + Math.min(0, t.profitLoss ?? 0), 0));
+  const totalWin = closed.reduce((s, t) => s + Math.max(0, netPnl(t)), 0);
+  const totalLoss = Math.abs(closed.reduce((s, t) => s + Math.min(0, netPnl(t)), 0));
   const profitFactor = totalLoss > 0 ? totalWin / totalLoss : null;
 
   // By symbol
@@ -167,7 +167,7 @@ function computePerformance(trades: Trade[]): PerformanceResult {
   let peak = 0, equity = 0, maxDD = 0;
   const pnlCurve: { index: number; cumulative: number }[] = [];
   for (let i = 0; i < closed.length; i++) {
-    equity += closed[i].profitLoss!;
+    equity += netPnl(closed[i]);
     if (equity > peak) peak = equity;
     const dd = peak - equity;
     if (dd > maxDD) maxDD = dd;
@@ -182,8 +182,8 @@ function computePerformance(trades: Trade[]): PerformanceResult {
     else { cw = 0; cl = 0; }
   }
 
-  const winPnls = wins.map(t => t.profitLoss!);
-  const lossPnls = losses.map(t => t.profitLoss!);
+  const winPnls = wins.map(netPnl);
+  const lossPnls = losses.map(netPnl);
 
   return {
     totalPnl: equity,
